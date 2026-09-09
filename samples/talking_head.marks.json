@@ -1,0 +1,35 @@
+{
+  "duration": 22.541,
+  "defects": [
+    {
+      "kind": "silence",
+      "text": "Hello, and welcome back to the channel.",
+      "start": 0.0,
+      "end": 3.653
+    },
+    {
+      "kind": "filler",
+      "text": "Today I want to talk about, um, three ways to speed up your workflow.",
+      "start": 3.653,
+      "end": 7.807
+    },
+    {
+      "kind": "retake",
+      "text": "The first thing you should.",
+      "start": 7.807,
+      "end": 9.613
+    },
+    {
+      "kind": "silence",
+      "text": "The second one is to batch similar tasks together.",
+      "start": 12.165,
+      "end": 16.122
+    },
+    {
+      "kind": "filler",
+      "text": "And the third, uh, is to leave yourself a note before you stop.",
+      "start": 16.122,
+      "end": 19.783
+    }
+  ]
+}

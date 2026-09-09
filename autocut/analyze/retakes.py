@@ -1,0 +1,325 @@
+"""Retake and false-start removal -- the one stage that uses a language model.
+
+A local model is the least reliable component in the pipeline, so nothing it
+says is trusted directly.  Every proposal is checked against the transcript and
+the timings, and any failure at all discards the model's output and falls back
+to a deterministic detector.  The pipeline must never fail, or cut wildly,
+because a local model had a bad day; the acceptable failure mode is cutting
+less than it could have.
+
+The deterministic fallback exploits the structure of a real retake: when you
+fluff a line you restart it, so the same run of words appears twice within a
+few seconds.  The LLM path is looser -- ``_is_superseded`` accepts a paraphrase,
+not just a verbatim repeat -- because that guard is what stands between a weak
+local model and a false cut, so it has to catch the retakes the model is
+actually good at finding, not just the ones the n-gram detector already gets.
+"""
+
+from __future__ import annotations
+
+import json
+import logging
+import urllib.error
+import urllib.request
+from collections import Counter
+
+from ..asr.base import normalize
+from ..config import RetakeConfig
+from ..models import Reason, RemovalSpan, Word
+
+log = logging.getLogger(__name__)
+
+#: Words per request.  Small enough that a local model keeps track, with an
+#: overlap so a retake straddling a boundary is still seen whole.
+_CHUNK_WORDS = 220
+_CHUNK_OVERLAP = 30
+
+_SYSTEM_PROMPT = """\
+You edit raw talking-head video transcripts. The speaker sometimes fluffs a \
+line, stops, and starts the sentence again. Your job is to find the abandoned \
+attempts so they can be cut, leaving the clean take.
+
+You are given the transcript as numbered words. Return JSON only:
+{"removals": [{"start": <first word index to cut>, "end": <last word index to \
+cut>, "why": "<a few words>"}]}
+
+Rules:
+- Only mark a span when a LATER part of the transcript says the same thing \
+properly. The good take must remain.
+- Mark false starts, abandoned sentences, and stumbles that are immediately \
+repeated.
+- Do NOT mark filler words, pauses, or anything merely wordy. Something else \
+handles those.
+- Do NOT rewrite or reorder anything. Only choose spans to delete.
+- If nothing was restarted, return {"removals": []}.\
+"""
+
+_SCHEMA = {
+    "type": "object",
+    "properties": {
+        "removals": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "properties": {
+                    "start": {"type": "integer"},
+                    "end": {"type": "integer"},
+                    "why": {"type": "string"},
+                },
+                "required": ["start", "end"],
+            },
+        }
+    },
+    "required": ["removals"],
+}
+
+
+class RetakeValidationError(ValueError):
+    """The model's plan failed a sanity check and was discarded."""
+
+
+#: Stripped out before measuring overlap in ``_is_superseded``, so a match
+#: cannot be manufactured out of "the", "is", "a" and "to" alone -- content
+#: words are what make two spans the same statement, not function words.
+_STOPWORDS = frozenset({
+    "a", "an", "the", "is", "was", "are", "were", "be", "been", "am",
+    "to", "of", "in", "on", "at", "for", "with", "as", "and", "but", "so",
+    "i", "you", "we", "it", "that", "this", "do", "does", "did", "um", "uh",
+})
+
+
+def _content_words(tokens: list[str]) -> list[str]:
+    return [token for token in tokens if token and token not in _STOPWORDS]
+
+
+def _installed_models(config: RetakeConfig) -> list[str]:
+    request = urllib.request.Request(f"{config.ollama_host.rstrip('/')}/api/tags")
+    with urllib.request.urlopen(request, timeout=5) as response:
+        body = json.loads(response.read())
+    return [model.get("name", "") for model in body.get("models", [])]
+
+
+def choose_model(config: RetakeConfig) -> str:
+    """The model to use: the configured one, or the best one installed.
+
+    Naming a model that has not been pulled would fail on every run and quietly
+    demote us to the n-gram detector, so when nothing is configured we ask
+    Ollama what it actually has.
+    """
+    if config.model:
+        return config.model
+
+    installed = _installed_models(config)
+    if not installed:
+        raise RetakeValidationError("Ollama has no models installed")
+
+    # Exact match first, then a looser one so "qwen2.5:7b-instruct" counts.
+    for preferred in config.preferred_models:
+        if preferred in installed:
+            return preferred
+        family = preferred.split(":")[0]
+        for name in installed:
+            if name.split(":")[0] == family:
+                return name
+    return installed[0]
+
+
+def _ask_ollama(prompt: str, model: str, config: RetakeConfig) -> dict:
+    payload = json.dumps(
+        {
+            "model": model,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "stream": False,
+            "format": _SCHEMA,
+            "options": {"temperature": 0.0},
+        }
+    ).encode()
+
+    request = urllib.request.Request(
+        f"{config.ollama_host.rstrip('/')}/api/chat",
+        data=payload,
+        headers={"Content-Type": "application/json"},
+    )
+    with urllib.request.urlopen(request, timeout=config.timeout) as response:
+        body = json.loads(response.read())
+    content = body.get("message", {}).get("content", "")
+    try:
+        return json.loads(content)
+    except json.JSONDecodeError as error:
+        raise RetakeValidationError(f"model did not return JSON: {content[:200]!r}") from error
+
+
+def _is_superseded(words: list[Word], start: int, end: int, config: RetakeConfig) -> bool:
+    """Whether the content of ``[start:end]`` is said again afterwards.
+
+    This is the check that makes a weak local model safe to use.  Asked to find
+    retakes in a clean transcript, a small model will happily invent one -- in
+    testing, qwen2.5:7b proposed cutting "and welcome back to the channel" as a
+    "repeated introduction" when nothing repeated it.
+
+    A real retake is rarely repeated verbatim, though -- "The first thing you
+    should do is--" becomes "So the first thing is...".  Requiring an exact run
+    of words rejects exactly the paraphrased retakes a model is best at
+    catching, so instead this slides a same-ish-sized window across what
+    follows and measures how much of the span's *content* -- function words
+    like "the"/"is"/"a" stripped out, so they cannot inflate the score --
+    reappears in it.  Content the speaker only said once can never produce a
+    high overlap, whatever the model's proposal claims.
+    """
+    span_tokens = _content_words([normalize(word.text) for word in words[start : end + 1]])
+    if len(span_tokens) < config.min_overlap_words:
+        # Too short or too generic to judge reliably: reject rather than guess.
+        return False
+    span_counts = Counter(span_tokens)
+
+    deadline = words[end].end + config.ngram_window
+    following = [
+        normalize(word.text) for word in words[end + 1 :] if word.start <= deadline
+    ]
+
+    span_length = end - start + 1
+    max_window = min(span_length + 4, len(following))
+    for window_size in range(max(1, span_length - 2), max_window + 1):
+        for i in range(len(following) - window_size + 1):
+            window_tokens = _content_words(following[i : i + window_size])
+            if not window_tokens:
+                continue
+            overlap = sum((span_counts & Counter(window_tokens)).values())
+            if overlap / len(span_tokens) >= config.paraphrase_threshold:
+                return True
+    return False
+
+
+def _validate_chunk(
+    proposals: list[dict], words: list[Word], offset: int, count: int, config: RetakeConfig
+) -> list[tuple[int, int, str]]:
+    """Check one chunk's proposals, returning absolute word index ranges."""
+    accepted: list[tuple[int, int, str]] = []
+    for item in proposals:
+        try:
+            start = int(item["start"])
+            end = int(item["end"])
+        except (KeyError, TypeError, ValueError) as error:
+            raise RetakeValidationError(f"malformed span {item!r}") from error
+
+        if not (0 <= start <= end < count):
+            raise RetakeValidationError(f"span {start}-{end} outside the chunk of {count} words")
+
+        absolute_start, absolute_end = offset + start, offset + end
+        # A genuine restart has a beat before the good take begins.  Without
+        # one, this is far more likely to be the model deleting content it
+        # merely disliked.
+        if absolute_end + 1 < len(words):
+            pause = words[absolute_end + 1].start - words[absolute_end].end
+            if pause < config.required_pause:
+                log.warning(
+                    "rejecting retake %r: only %.2fs before the restart",
+                    item.get("why", ""), pause,
+                )
+                continue
+
+        if not _is_superseded(words, absolute_start, absolute_end, config):
+            log.warning(
+                "rejecting retake %r: nothing later repeats it", item.get("why", "")
+            )
+            continue
+
+        accepted.append((absolute_start, absolute_end, str(item.get("why", ""))))
+    return accepted
+
+
+def _llm_spans(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
+    model = choose_model(config)
+    spans: list[RemovalSpan] = []
+    step = _CHUNK_WORDS - _CHUNK_OVERLAP
+
+    for offset in range(0, len(words), step):
+        chunk = words[offset : offset + _CHUNK_WORDS]
+        if len(chunk) < 8:
+            break
+        numbered = "\n".join(f"{i}: {word.text}" for i, word in enumerate(chunk))
+        result = _ask_ollama(numbered, model, config)
+        proposals = result.get("removals")
+        if not isinstance(proposals, list):
+            raise RetakeValidationError(f"'removals' was {type(proposals).__name__}, not a list")
+
+        for start, end, why in _validate_chunk(proposals, words, offset, len(chunk), config):
+            spans.append(
+                RemovalSpan(
+                    start=words[start].start,
+                    end=words[end].end,
+                    reason=Reason.RETAKE,
+                    confidence=0.7,
+                    detail=why[:80],
+                )
+            )
+
+    total_speech = sum(word.duration for word in words) or 1.0
+    removed = sum(span.duration for span in spans)
+    if removed / total_speech > config.max_removal_ratio:
+        raise RetakeValidationError(
+            f"plan removes {removed / total_speech:.0%} of speech, over the "
+            f"{config.max_removal_ratio:.0%} ceiling"
+        )
+    return spans
+
+
+def _ngram_repeats(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
+    """Deterministic fallback: an identical run of words repeated soon after
+    means the first attempt was abandoned."""
+    n = config.ngram_size
+    if len(words) < n * 2:
+        return []
+
+    normalized = [normalize(word.text) for word in words]
+    seen: dict[tuple[str, ...], list[int]] = {}
+    for index in range(len(normalized) - n + 1):
+        seen.setdefault(tuple(normalized[index : index + n]), []).append(index)
+
+    spans: list[RemovalSpan] = []
+    for gram, positions in seen.items():
+        for earlier, later in zip(positions, positions[1:]):
+            if later <= earlier:
+                continue
+            if words[later].start - words[earlier].start > config.ngram_window:
+                continue
+            # Only a restart, not a refrain: the two attempts must be adjacent,
+            # with nothing but the fluffed words between them.
+            if later - earlier > n * 3:
+                continue
+            pause = words[later].start - words[later - 1].end
+            if pause < config.required_pause:
+                continue
+            spans.append(
+                RemovalSpan(
+                    start=words[earlier].start,
+                    end=words[later - 1].end,
+                    reason=Reason.NGRAM_REPEAT,
+                    confidence=0.6,
+                    detail=" ".join(gram),
+                )
+            )
+    log.info("n-gram fallback proposed %d spans", len(spans))
+    return spans
+
+
+def detect(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
+    if not config.enabled or len(words) < 8:
+        return []
+
+    # The deterministic detector always runs.  It is precise but narrow -- it
+    # only sees retakes where the words repeat exactly -- so the model's job is
+    # to add the ones it misses, not to replace it.  If the model is missing,
+    # unreachable or talking nonsense, we still catch the obvious cases.
+    spans = _ngram_repeats(words, config)
+
+    try:
+        spans += _llm_spans(words, config)
+    except (RetakeValidationError, urllib.error.URLError, TimeoutError, OSError) as error:
+        log.warning("retake model unusable (%s); using the n-gram detector alone", error)
+
+    log.info("retake detector proposed %d spans", len(spans))
+    return spans

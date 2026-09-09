@@ -1,0 +1,204 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>autocut</title>
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --line: #262c35;
+    --text: #e6e9ee;
+    --muted: #8b95a3;
+    --accent: #ffd44a;
+    --ok: #4ade80;
+    --bad: #f87171;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; padding: 48px 24px; background: var(--bg); color: var(--text);
+    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    display: flex; justify-content: center;
+  }
+  main { width: 100%; max-width: 620px; }
+  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
+  .sub { color: var(--muted); margin: 0 0 28px; font-size: 14px; }
+
+  #drop {
+    border: 2px dashed var(--line); border-radius: 14px; padding: 44px 24px;
+    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
+    background: var(--panel);
+  }
+  #drop:hover, #drop.over { border-color: var(--accent); background: #1c2129; }
+  #drop strong { display: block; margin-bottom: 6px; }
+  #drop span { color: var(--muted); font-size: 13px; }
+
+  .options { display: flex; gap: 8px; align-items: center; margin-top: 16px; font-size: 13px; }
+  .options label { color: var(--muted); }
+  select {
+    background: var(--panel); color: var(--text); border: 1px solid var(--line);
+    border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px;
+  }
+
+  .card {
+    margin-top: 20px; background: var(--panel); border: 1px solid var(--line);
+    border-radius: 14px; padding: 20px;
+  }
+  .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
+  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pct { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 13px; }
+  .bar { height: 6px; background: #0c0f13; border-radius: 999px; overflow: hidden; margin: 14px 0 10px; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
+  .msg { color: var(--muted); font-size: 13px; }
+  .msg.error { color: var(--bad); }
+
+  ol.stages { list-style: none; margin: 16px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
+  ol.stages li {
+    font-size: 11px; padding: 4px 9px; border-radius: 999px;
+    border: 1px solid var(--line); color: var(--muted);
+  }
+  ol.stages li.active { border-color: var(--accent); color: var(--accent); }
+  ol.stages li.done { border-color: #2c4a35; color: var(--ok); }
+
+  video { width: 100%; max-width: 300px; border-radius: 12px; margin-top: 18px; display: block; background: #000; }
+  .summary { margin-top: 14px; font-size: 13px; color: var(--muted); }
+  .summary b { color: var(--text); font-weight: 600; }
+  a.download {
+    display: inline-block; margin-top: 14px; background: var(--accent); color: #171b21;
+    text-decoration: none; padding: 9px 16px; border-radius: 9px; font-weight: 600; font-size: 14px;
+  }
+</style>
+</head>
+<body>
+<main>
+  <h1>autocut</h1>
+  <p class="sub">Raw take in, vertical cut with captions out.</p>
+
+  <div id="drop">
+    <strong>Drop a video here</strong>
+    <span>or click to choose &middot; mp4, mov, m4v</span>
+  </div>
+  <input id="file" type="file" accept="video/*" hidden>
+
+  <div class="options">
+    <label for="preset">Edit</label>
+    <select id="preset">
+      <option value="default">Default</option>
+      <option value="gentle">Gentle &mdash; pauses only</option>
+      <option value="aggressive">Aggressive &mdash; tight</option>
+    </select>
+  </div>
+
+  <div id="jobs"></div>
+</main>
+
+<script>
+const STAGES = ["ingest", "transcribe", "analyze", "cut", "track", "captions", "compose"];
+const LABELS = {
+  ingest: "read", transcribe: "transcribe", analyze: "find cuts",
+  cut: "cut", track: "frame", captions: "caption", compose: "render",
+};
+
+const drop = document.getElementById("drop");
+const input = document.getElementById("file");
+const jobsEl = document.getElementById("jobs");
+
+drop.addEventListener("click", () => input.click());
+drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
+drop.addEventListener("dragleave", () => drop.classList.remove("over"));
+drop.addEventListener("drop", e => {
+  e.preventDefault();
+  drop.classList.remove("over");
+  if (e.dataTransfer.files.length) upload(e.dataTransfer.files[0]);
+});
+input.addEventListener("change", () => {
+  if (input.files.length) upload(input.files[0]);
+  input.value = "";
+});
+
+async function upload(file) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("preset", document.getElementById("preset").value);
+
+  const card = addCard(file.name);
+  try {
+    const response = await fetch("/jobs", { method: "POST", body });
+    if (!response.ok) throw new Error(await response.text());
+    const job = await response.json();
+    card.dataset.id = job.id;
+    render(card, job);
+    listen(card, job.id);
+  } catch (error) {
+    render(card, { status: "error", message: "upload failed", error: String(error), percent: 0 });
+  }
+}
+
+function addCard(filename) {
+  const card = document.createElement("div");
+  card.className = "card";
+  card.innerHTML = `
+    <div class="row"><span class="name"></span><span class="pct"></span></div>
+    <div class="bar"><i></i></div>
+    <div class="msg"></div>
+    <ol class="stages">${STAGES.map(s => `<li data-stage="${s}">${LABELS[s]}</li>`).join("")}</ol>
+    <div class="output"></div>`;
+  card.querySelector(".name").textContent = filename;
+  jobsEl.prepend(card);
+  return card;
+}
+
+// The server pushes the whole job snapshot on every change, so rendering is a
+// pure function of the latest one -- no incremental state to get out of sync.
+function render(card, job) {
+  card.querySelector(".pct").textContent = job.status === "done" ? "done" : `${job.percent || 0}%`;
+  card.querySelector(".bar > i").style.width = `${job.status === "done" ? 100 : (job.percent || 0)}%`;
+
+  const msg = card.querySelector(".msg");
+  msg.textContent = job.error ? `${job.message}: ${job.error}` : (job.message || "");
+  msg.classList.toggle("error", job.status === "error");
+
+  const reached = STAGES.indexOf(job.stage);
+  card.querySelectorAll(".stages li").forEach((li, index) => {
+    const done = job.status === "done" || (reached > -1 && index < reached);
+    li.classList.toggle("done", done);
+    li.classList.toggle("active", job.status !== "done" && index === reached);
+  });
+
+  if (job.status === "done" && job.summary && !card.querySelector("video")) {
+    const s = job.summary;
+    card.querySelector(".output").innerHTML = `
+      <video controls preload="metadata" src="/jobs/${card.dataset.id}/result"></video>
+      <div class="summary">
+        <b>${s.source_duration}s</b> &rarr; <b>${s.output_duration}s</b>
+        (${s.removed_percent}% removed) &middot; ${s.segments} segments &middot;
+        ${s.words} words &middot; ${s.tracked ? "face tracked" : "centre crop"} &middot;
+        rendered in ${s.elapsed}s
+      </div>
+      <a class="download" href="/jobs/${card.dataset.id}/result" download>Download</a>`;
+  }
+}
+
+function listen(card, id) {
+  const source = new EventSource(`/jobs/${id}/events`);
+  source.onmessage = event => {
+    const job = JSON.parse(event.data);
+    render(card, job);
+    if (job.status === "done" || job.status === "error") source.close();
+  };
+  source.onerror = () => source.close();
+}
+
+// Pick up anything already running, so a reload does not lose a job.
+fetch("/jobs").then(r => r.json()).then(jobs => {
+  for (const job of jobs.reverse()) {
+    const card = addCard(job.filename);
+    card.dataset.id = job.id;
+    render(card, job);
+    if (job.status === "queued" || job.status === "running") listen(card, job.id);
+  }
+});
+</script>
+</body>
+</html>

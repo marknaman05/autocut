@@ -1,0 +1,398 @@
+[
+ {
+  "text": "Hello,",
+  "start": 0.0,
+  "end": 0.26,
+  "probability": 0.8740234375
+ },
+ {
+  "text": "and",
+  "start": 0.4,
+  "end": 0.76,
+  "probability": 0.99853515625
+ },
+ {
+  "text": "welcome",
+  "start": 0.76,
+  "end": 1.06,
+  "probability": 0.994140625
+ },
+ {
+  "text": "back",
+  "start": 1.06,
+  "end": 1.32,
+  "probability": 0.99951171875
+ },
+ {
+  "text": "to",
+  "start": 1.32,
+  "end": 1.48,
+  "probability": 1.0
+ },
+ {
+  "text": "the",
+  "start": 1.48,
+  "end": 1.6,
+  "probability": 1.0
+ },
+ {
+  "text": "channel.",
+  "start": 1.6,
+  "end": 1.94,
+  "probability": 0.99951171875
+ },
+ {
+  "text": "Today",
+  "start": 3.48,
+  "end": 3.88,
+  "probability": 0.99755859375
+ },
+ {
+  "text": "I",
+  "start": 3.88,
+  "end": 4.06,
+  "probability": 0.9921875
+ },
+ {
+  "text": "want",
+  "start": 4.06,
+  "end": 4.28,
+  "probability": 1.0
+ },
+ {
+  "text": "to",
+  "start": 4.28,
+  "end": 4.44,
+  "probability": 1.0
+ },
+ {
+  "text": "talk",
+  "start": 4.44,
+  "end": 4.68,
+  "probability": 1.0
+ },
+ {
+  "text": "about,",
+  "start": 4.68,
+  "end": 5.08,
+  "probability": 1.0
+ },
+ {
+  "text": "um,",
+  "start": 5.08,
+  "end": 5.48,
+  "probability": 0.98193359375
+ },
+ {
+  "text": "three",
+  "start": 5.62,
+  "end": 5.94,
+  "probability": 0.69873046875
+ },
+ {
+  "text": "ways",
+  "start": 5.94,
+  "end": 6.2,
+  "probability": 1.0
+ },
+ {
+  "text": "to",
+  "start": 6.2,
+  "end": 6.36,
+  "probability": 1.0
+ },
+ {
+  "text": "speed",
+  "start": 6.36,
+  "end": 6.62,
+  "probability": 1.0
+ },
+ {
+  "text": "up",
+  "start": 6.62,
+  "end": 6.76,
+  "probability": 1.0
+ },
+ {
+  "text": "your",
+  "start": 6.76,
+  "end": 6.9,
+  "probability": 1.0
+ },
+ {
+  "text": "workflow.",
+  "start": 6.9,
+  "end": 7.36,
+  "probability": 0.9990234375
+ },
+ {
+  "text": "The",
+  "start": 7.78,
+  "end": 7.9,
+  "probability": 0.99951171875
+ },
+ {
+  "text": "first",
+  "start": 7.9,
+  "end": 8.16,
+  "probability": 1.0
+ },
+ {
+  "text": "thing",
+  "start": 8.16,
+  "end": 8.36,
+  "probability": 1.0
+ },
+ {
+  "text": "you",
+  "start": 8.36,
+  "end": 8.52,
+  "probability": 1.0
+ },
+ {
+  "text": "should.",
+  "start": 8.52,
+  "end": 8.84,
+  "probability": 1.0
+ },
+ {
+  "text": "The",
+  "start": 9.27,
+  "end": 9.68,
+  "probability": 0.99951171875
+ },
+ {
+  "text": "first",
+  "start": 9.68,
+  "end": 9.94,
+  "probability": 1.0
+ },
+ {
+  "text": "thing",
+  "start": 9.94,
+  "end": 10.16,
+  "probability": 1.0
+ },
+ {
+  "text": "you",
+  "start": 10.16,
+  "end": 10.32,
+  "probability": 1.0
+ },
+ {
+  "text": "should",
+  "start": 10.32,
+  "end": 10.52,
+  "probability": 1.0
+ },
+ {
+  "text": "do",
+  "start": 10.52,
+  "end": 10.68,
+  "probability": 1.0
+ },
+ {
+  "text": "is",
+  "start": 10.68,
+  "end": 10.84,
+  "probability": 1.0
+ },
+ {
+  "text": "write",
+  "start": 10.84,
+  "end": 11.06,
+  "probability": 0.99951171875
+ },
+ {
+  "text": "everything",
+  "start": 11.06,
+  "end": 11.44,
+  "probability": 1.0
+ },
+ {
+  "text": "down.",
+  "start": 11.44,
+  "end": 11.74,
+  "probability": 1.0
+ },
+ {
+  "text": "The",
+  "start": 12.120000000000001,
+  "end": 12.26,
+  "probability": 1.0
+ },
+ {
+  "text": "second",
+  "start": 12.26,
+  "end": 12.54,
+  "probability": 1.0
+ },
+ {
+  "text": "one",
+  "start": 12.54,
+  "end": 12.8,
+  "probability": 1.0
+ },
+ {
+  "text": "is",
+  "start": 12.8,
+  "end": 12.96,
+  "probability": 1.0
+ },
+ {
+  "text": "to",
+  "start": 12.96,
+  "end": 13.08,
+  "probability": 1.0
+ },
+ {
+  "text": "batch",
+  "start": 13.08,
+  "end": 13.32,
+  "probability": 0.99951171875
+ },
+ {
+  "text": "similar",
+  "start": 13.32,
+  "end": 13.72,
+  "probability": 1.0
+ },
+ {
+  "text": "tasks",
+  "start": 13.72,
+  "end": 14.14,
+  "probability": 1.0
+ },
+ {
+  "text": "together.",
+  "start": 14.14,
+  "end": 14.56,
+  "probability": 1.0
+ },
+ {
+  "text": "And",
+  "start": 15.82,
+  "end": 16.22,
+  "probability": 1.0
+ },
+ {
+  "text": "the",
+  "start": 16.22,
+  "end": 16.34,
+  "probability": 1.0
+ },
+ {
+  "text": "third,",
+  "start": 16.34,
+  "end": 16.6,
+  "probability": 1.0
+ },
+ {
+  "text": "ah,",
+  "start": 16.66,
+  "end": 17.08,
+  "probability": 0.61083984375
+ },
+ {
+  "text": "is",
+  "start": 17.16,
+  "end": 17.46,
+  "probability": 1.0
+ },
+ {
+  "text": "to",
+  "start": 17.46,
+  "end": 17.58,
+  "probability": 1.0
+ },
+ {
+  "text": "leave",
+  "start": 17.58,
+  "end": 17.8,
+  "probability": 1.0
+ },
+ {
+  "text": "yourself",
+  "start": 17.8,
+  "end": 18.16,
+  "probability": 1.0
+ },
+ {
+  "text": "a",
+  "start": 18.16,
+  "end": 18.38,
+  "probability": 1.0
+ },
+ {
+  "text": "note",
+  "start": 18.38,
+  "end": 18.52,
+  "probability": 1.0
+ },
+ {
+  "text": "before",
+  "start": 18.52,
+  "end": 18.8,
+  "probability": 1.0
+ },
+ {
+  "text": "you",
+  "start": 18.8,
+  "end": 19.06,
+  "probability": 1.0
+ },
+ {
+  "text": "stop.",
+  "start": 19.06,
+  "end": 19.42,
+  "probability": 0.99951171875
+ },
+ {
+  "text": "That",
+  "start": 19.76,
+  "end": 19.9,
+  "probability": 0.9990234375
+ },
+ {
+  "text": "is",
+  "start": 19.9,
+  "end": 20.04,
+  "probability": 1.0
+ },
+ {
+  "text": "everything",
+  "start": 20.04,
+  "end": 20.38,
+  "probability": 1.0
+ },
+ {
+  "text": "for",
+  "start": 20.38,
+  "end": 20.62,
+  "probability": 1.0
+ },
+ {
+  "text": "today.",
+  "start": 20.62,
+  "end": 20.98,
+  "probability": 1.0
+ },
+ {
+  "text": "Thanks",
+  "start": 21.22,
+  "end": 21.58,
+  "probability": 0.95166015625
+ },
+ {
+  "text": "for",
+  "start": 21.58,
+  "end": 21.76,
+  "probability": 0.998046875
+ },
+ {
+  "text": "watching.",
+  "start": 21.76,
+  "end": 22.06,
+  "probability": 0.9853515625
+ }
+]

@@ -1,0 +1,50 @@
+[project]
+name = "autocut"
+version = "0.1.0"
+description = "Local one-click editor for portrait talking-head video: cuts, reframes, and captions."
+readme = "README.md"
+requires-python = ">=3.12,<3.13"
+dependencies = [
+    "pydantic>=2.7",
+    "numpy>=1.26",
+    # Captions are rendered with Pillow rather than libass: Homebrew's ffmpeg
+    # is built without it, and this keeps the pipeline independent of which
+    # ffmpeg build happens to be installed.
+    "pillow>=10.3",
+]
+
+[project.optional-dependencies]
+asr = [
+    "mlx-whisper>=0.4.0",
+]
+# Face tracking. YuNet runs through OpenCV's own dnn module, so no
+# second vision framework is needed.
+vision = [
+    "opencv-python>=4.10",
+]
+server = [
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
+    "python-multipart>=0.0.9",
+]
+
+[project.scripts]
+autocut = "autocut.__main__:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.2",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["autocut", "server"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+# The slow marker covers the real ASR model; deselected by default.
+addopts = "-m 'not slow'"
+markers = ["slow: needs the ASR model downloaded"]
