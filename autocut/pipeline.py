@@ -108,6 +108,28 @@ def analyze(timeline: Timeline, preset: Preset, envelope: Envelope | None) -> li
 EDIT_FILE = "edit.json"
 
 
+def part_envelope(timeline: Timeline) -> Envelope | None:
+    """The analysis envelope for a timeline, or ``None`` if it is not on disk.
+
+    Review and render both split the timeline into parts, and both must place
+    the boundaries identically -- what a person listened to has to be what gets
+    rendered -- so both go through here rather than loading the waveform their
+    own way.  Missing audio is not an error: the boundaries simply stay where
+    the word timestamps put them, which is where they were before.
+    """
+    if timeline.audio is None:
+        return None
+    path = Path(timeline.audio)
+    if not path.exists():
+        log.warning("no analysis audio at %s; part boundaries stay unrelaxed", path)
+        return None
+    try:
+        return Envelope.from_wav(path)
+    except (OSError, ValueError) as error:
+        log.warning("could not read %s (%s); part boundaries stay unrelaxed", path, error)
+        return None
+
+
 def _prepare(
     source: Path, work_dir: Path, preset: Preset, report: _Reporter
 ) -> tuple[Timeline, Envelope | None]:
@@ -299,10 +321,13 @@ def render_edit(
     report = _Reporter(on_progress, _RENDER_WEIGHTS)
 
     timeline = Timeline(**json.loads((work_dir / "timeline.json").read_text()))
+    envelope = part_envelope(timeline)
     pieces = merge.parts(
         timeline.removals, timeline.duration, timeline.words,
         min_pause=preset.review_min_pause,
         part_pause=preset.part_pause,
+        envelope=envelope,
+        relax=preset.boundary_relax,
     )
     chosen = set(keep)
     segments = merge.coalesce(
@@ -315,6 +340,11 @@ def render_edit(
     if not segments:
         log.error("no parts were kept; falling back to the uncut timeline")
         segments = [KeepSegment(start=0.0, end=timeline.duration)]
+    # A person's choice of parts is final; this only ever adds room tone at a
+    # join they made, and only where a sentence would otherwise have none.
+    segments = merge.coalesce(
+        merge.breathe(segments, timeline.words, envelope, preset.silence.sentence_pause)
+    )
 
     timeline.keep_segments = segments
     (work_dir / EDIT_FILE).write_text(

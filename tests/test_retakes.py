@@ -7,6 +7,8 @@ of the system.  Every test below is a rule the model is not allowed to break.
 
 from __future__ import annotations
 
+from dataclasses import replace
+
 import pytest
 
 from autocut.analyze import retakes
@@ -150,7 +152,7 @@ class TestValidateChunk:
         accepted = retakes._validate_chunk(
             [{"start": 0, "end": 4, "why": "false start"}], words, 0, len(words), self.config
         )
-        assert accepted == [(0, 4, "false start")]
+        assert accepted == [(0, 4, "false start", retakes._CONFIDENCE_REPEATED)]
 
     def test_a_span_nothing_repeats_is_rejected(self, words) -> None:
         # Words 10-14 are the tail of the good take; nothing follows them.
@@ -173,6 +175,72 @@ class TestValidateChunk:
         assert retakes._validate_chunk(
             [{"start": 0, "end": 3, "why": "no beat"}], words, 0, len(words), self.config
         ) == []
+
+
+class TestReplacementClaim:
+    """A retake the transcript does not repeat, but the model points at.
+
+    This is the path that catches a reworded restart -- "The tool cuts video
+    into parts." replaced by forty different words saying the same thing --
+    which no lexical overlap measure can confirm.
+    """
+
+    config = RetakeConfig()
+
+    @pytest.fixture
+    def words(self) -> list[Word]:
+        # Nothing in the second half repeats the first, so only a named
+        # replacement can get the span accepted.
+        return speech("the tool cuts video into parts", pause_before={6}) + speech(
+            "what really happens under here is rather different entirely", start=8.0
+        )
+
+    def claim(self, **overrides) -> dict:
+        return {
+            "start": 0, "end": 5, "why": "reworded restart",
+            "replaced_by_start": 6, "replaced_by_end": 14, **overrides,
+        }
+
+    def test_a_named_later_span_is_accepted_with_lower_confidence(self, words) -> None:
+        assert not retakes._is_superseded(words, 0, 5, self.config)
+        assert retakes._validate_chunk(
+            [self.claim()], words, 0, len(words), self.config
+        ) == [(0, 5, "reworded restart", retakes._CONFIDENCE_CLAIMED)]
+
+    def test_a_replacement_inside_the_cut_is_rejected(self, words) -> None:
+        # Pointing at words that are themselves being deleted leaves no good
+        # take at all, which is the shape of an invented retake.
+        assert retakes._validate_chunk(
+            [self.claim(replaced_by_start=1, replaced_by_end=4)],
+            words, 0, len(words), self.config,
+        ) == []
+
+    def test_a_replacement_out_of_range_is_rejected(self, words) -> None:
+        assert retakes._validate_chunk(
+            [self.claim(replaced_by_end=999)], words, 0, len(words), self.config
+        ) == []
+
+    def test_a_missing_replacement_is_rejected(self, words) -> None:
+        assert retakes._validate_chunk(
+            [{"start": 0, "end": 5, "why": "unsupported"}],
+            words, 0, len(words), self.config,
+        ) == []
+
+    def test_a_replacement_far_later_is_rejected(self, words) -> None:
+        # The speaker returning to the subject a minute on is not a retake.
+        config = replace(self.config, supersede_window=1.0)
+        assert retakes._validate_chunk(
+            [self.claim()], words, 0, len(words), config
+        ) == []
+
+
+class TestNumbering:
+    def test_a_long_pause_is_marked_for_the_model(self) -> None:
+        words = speech("the tool cuts video", pause_before={2})
+        assert "[pause" in retakes._numbered(words)
+
+    def test_ordinary_word_gaps_are_not_marked(self) -> None:
+        assert "[pause" not in retakes._numbered(speech("the tool cuts video"))
 
 
 class TestDetect:

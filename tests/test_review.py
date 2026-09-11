@@ -13,12 +13,17 @@ deliberately, quietly overrule them.
 
 from __future__ import annotations
 
+import asyncio
+import json
+
 import pytest
 
 from autocut.analyze import merge
 from autocut.config import Preset
+from tests.test_merge import envelope
+from autocut.audio import Envelope
 from autocut.models import KeepSegment, Reason, RemovalSpan, Timeline, Word
-from server.jobs import Job
+from server.jobs import Job, JobManager
 
 
 def span(start: float, end: float, reason: Reason = Reason.SILENCE, detail: str = "") -> RemovalSpan:
@@ -182,7 +187,6 @@ class TestPauseSplitting:
         """The CLI and the tests that predate this still get whole stretches."""
         pieces = merge.parts([], duration=10)
         assert len(pieces) == 1
-
     def test_a_removal_is_never_split_by_a_pause(self) -> None:
         """A cut is one decision, however many sentences -- or pauses -- it
         covers."""
@@ -353,3 +357,220 @@ class TestPartsPayload:
     def test_a_job_with_nothing_proposed_yet_has_no_parts(self, tmp_path) -> None:
         bare = Job(id="x", filename="a.mp4", source=tmp_path / "a.mp4", work_dir=tmp_path)
         assert bare.parts() == []
+
+
+class TestPartBoundariesLeaveSpeech:
+    """A part boundary must not land in the middle of a word.
+
+    A pause split is placed at a word timestamp, and a word is audible either
+    side of the one it is given: it starts a little early and rings on after
+    it ends.  Splicing exactly at the timestamp clips the tail of the sentence
+    before the boundary or the onset of the one after it -- measured on a real
+    recording, the end of a part sat at -29 dB with the silence threshold at
+    -53 dB, which is the last word of the sentence being cut in half.
+
+    Relaxing a boundary only ever *grows* the speech a part holds, so the worst
+    outcome is a few milliseconds of room tone kept.
+    """
+
+    PAUSE = 0.35
+    RELAX = 0.25
+    #: Indices of the two parts that hold a sentence.  The others are the
+    #: silence before the first word, the pause between the sentences, and the
+    #: silence after the last word -- each a part in its own right.
+    SPOKEN = (1, 3)
+
+    def words(self) -> list[Word]:
+        # Timestamps deliberately tighter than the audio: each sentence's
+        # first word starts after its onset and its last word ends before its
+        # tail has died away, which is how Whisper actually places them.
+        return [
+            Word(text="the", start=1.0, end=1.3),
+            Word(text="turtle", start=1.35, end=1.7),
+            Word(text="and", start=3.1, end=3.4),
+            Word(text="rest.", start=3.45, end=3.8),
+        ]
+
+    def envelope(self) -> Envelope:
+        return envelope(5.0, [(0.9, 1.9), (3.0, 3.95)])
+
+    def boundaries(self, **kwargs) -> list[tuple[float, float]]:
+        return [
+            (a, b)
+            for a, b, _ in merge.parts(
+                [], duration=5.0, words=self.words(), part_pause=self.PAUSE, **kwargs
+            )
+        ]
+
+    def test_unrelaxed_boundaries_land_inside_the_words(self) -> None:
+        """What the bug looked like, so the fix below is not vacuous."""
+        level = self.envelope()
+        loud = [
+            edge
+            for index in self.SPOKEN
+            for edge in self.boundaries()[index]
+            if level.level_at(edge) >= level.silence_threshold
+        ]
+        assert loud, "the unfixed boundaries should sit on speech"
+
+    def test_every_spoken_part_is_bounded_by_silence(self) -> None:
+        level = self.envelope()
+        parts = self.boundaries(envelope=level, relax=self.RELAX)
+        for index in self.SPOKEN:
+            for edge in parts[index]:
+                assert level.level_at(edge) < level.silence_threshold, (
+                    f"part {index} still joins on speech at {edge:.2f}"
+                )
+
+    def test_a_spoken_part_grows_to_cover_the_whole_word(self) -> None:
+        """Specifically: past the tail of the last word and before the onset
+        of the first, which is the audio the timestamps leave out."""
+        parts = self.boundaries(envelope=self.envelope(), relax=self.RELAX)
+        first_start, first_end = parts[1]
+        assert first_start < 1.0 and first_end > 1.7
+        second_start, second_end = parts[3]
+        assert second_start < 3.1 and second_end > 3.8
+
+    def test_the_pause_between_them_survives_as_its_own_part(self) -> None:
+        """Both boundaries move inward toward each other and neither may
+        cross: the pause has to stay a part, or a part someone reviewed stops
+        existing between review and render."""
+        parts = self.boundaries(envelope=self.envelope(), relax=self.RELAX)
+        assert len(parts) == len(self.boundaries())
+        start, end = parts[2]
+        assert end > start
+
+    def test_relaxing_never_shrinks_a_spoken_part(self) -> None:
+        plain = self.boundaries()
+        relaxed = self.boundaries(envelope=self.envelope(), relax=self.RELAX)
+        for index in self.SPOKEN:
+            assert relaxed[index][0] <= plain[index][0]
+            assert relaxed[index][1] >= plain[index][1]
+
+    def test_the_parts_still_tile_the_timeline(self) -> None:
+        """Every instant belongs to exactly one part, before and after."""
+        parts = self.boundaries(envelope=self.envelope(), relax=self.RELAX)
+        assert parts[0][0] == 0.0
+        assert parts[-1][1] == pytest.approx(5.0)
+        for (_, end), (start, _) in zip(parts, parts[1:]):
+            assert start == pytest.approx(end)
+
+    def test_without_an_envelope_the_boundaries_are_unchanged(self) -> None:
+        """The waveform is optional everywhere else in the pipeline; a job
+        whose audio has gone missing still reviews and renders."""
+        assert self.boundaries(envelope=None, relax=self.RELAX) == self.boundaries()
+
+
+class TestCaptionCorrections:
+    """Fixing a word the recogniser misheard, before the captions are drawn.
+
+    Whisper places a word's text reliably except where it does not -- names,
+    jargon and product names are exactly what a talking-head video is full of,
+    and "AutoCut" comes back as "auto cut" or "audocut" often enough that a
+    caption pass is unusable without a way to fix one word.
+
+    The rule that shapes the whole feature: only ``text`` may move. Timings are
+    what the karaoke highlight runs on and what every cut was decided against,
+    so a correction that could shift one would quietly invalidate the edit that
+    was just reviewed.
+    """
+
+    #: The fixture's transcript: an abandoned attempt, then the good take.
+    ORIGINAL = ["the", "first", "thing", "the", "first", "thing", "is"]
+
+    def correct(self, job, edits) -> None:
+        asyncio.run(JobManager(job.work_dir).edit_captions(job, edits))
+
+    def test_a_misheard_word_is_replaced(self, job) -> None:
+        self.correct(job, [{"index": 1, "text": "worst"}])
+        assert [w.text for w in job.timeline.words] == [
+            "the", "worst", "thing", "the", "first", "thing", "is",
+        ]
+
+    def test_the_timing_is_left_exactly_alone(self, job) -> None:
+        """The point of the whole restriction, asserted directly."""
+        before = [(w.start, w.end) for w in job.timeline.words]
+        self.correct(job, [{"index": 1, "text": "considerably-longer-word"}])
+        assert [(w.start, w.end) for w in job.timeline.words] == before
+
+    def test_the_correction_reaches_the_file_the_render_reads(self, job) -> None:
+        """``render_edit`` loads the transcript off disk, not out of memory, so
+        a correction that only updated the object would caption the video with
+        the word it was meant to replace."""
+        self.correct(job, [{"index": 0, "text": "The"}])
+        stored = json.loads((job.work_dir / "timeline.json").read_text())
+        assert stored["words"][0]["text"] == "The"
+
+    def test_several_words_go_in_one_correction(self, job) -> None:
+        self.correct(job, [{"index": 0, "text": "one"}, {"index": 6, "text": "two"}])
+        assert [w.text for w in job.timeline.words] == [
+            "one", "first", "thing", "the", "first", "thing", "two",
+        ]
+
+    def test_a_blank_word_is_refused(self, job) -> None:
+        """A word keeps its slot on the timeline whatever happens to its text,
+        and the caption has to draw something in it."""
+        with pytest.raises(ValueError):
+            self.correct(job, [{"index": 1, "text": "   "}])
+
+    def test_a_word_that_does_not_exist_is_refused(self, job) -> None:
+        with pytest.raises(ValueError):
+            self.correct(job, [{"index": 99, "text": "nope"}])
+
+    def test_a_malformed_correction_is_refused(self, job) -> None:
+        with pytest.raises(ValueError):
+            self.correct(job, [{"text": "no index"}])
+
+    def test_nothing_is_written_when_a_correction_is_refused(self, job) -> None:
+        """The whole batch fails together: a half-applied correction would
+        leave the transcript in a state nobody asked for."""
+        with pytest.raises(ValueError):
+            self.correct(job, [{"index": 0, "text": "fine"}, {"index": 99, "text": "bad"}])
+        assert [w.text for w in job.timeline.words] == self.ORIGINAL
+        assert not (job.work_dir / "timeline.json").exists()
+
+    def test_a_job_with_no_transcript_yet_is_refused(self, tmp_path) -> None:
+        bare = Job(id="x", filename="a.mp4", source=tmp_path / "a.mp4", work_dir=tmp_path)
+        with pytest.raises(ValueError):
+            self.correct(bare, [{"index": 0, "text": "nope"}])
+
+
+class TestCaptionPayload:
+    """What the review screen needs to offer a word for correction."""
+
+    def test_each_part_carries_its_words_and_their_places(self, job) -> None:
+        spoken = next(p for p in job.parts() if p["words"])
+        assert [w["text"] for w in spoken["caption"]] == ["the", "first", "thing"]
+
+    def test_the_indices_address_the_transcript_not_the_part(self, job) -> None:
+        """A part is not a stable address -- re-running the detectors renumbers
+        them -- so a correction names the word's place in the transcript."""
+        indices = [w["index"] for p in job.parts() for w in p["caption"]]
+        assert indices == sorted(indices)
+        for part in job.parts():
+            for word in part["caption"]:
+                assert job.timeline.words[word["index"]].text == word["text"]
+
+    def test_a_part_with_no_speech_offers_nothing_to_correct(self, job) -> None:
+        silent = next(p for p in job.parts() if not p["words"])
+        assert silent["caption"] == []
+
+    def test_a_correction_shows_up_in_the_parts_that_follow(self, job) -> None:
+        asyncio.run(JobManager(job.work_dir).edit_captions(job, [{"index": 1, "text": "worst"}]))
+        spoken = next(p for p in job.parts() if p["words"])
+        assert "worst" in spoken["text"]
+        assert [w["text"] for w in spoken["caption"]] == ["the", "worst", "thing"]
+
+    def test_a_word_the_recogniser_doubted_is_marked(self, job) -> None:
+        """Whisper reports a probability per word and it is worth believing:
+        on one recording the median word scored 0.99 and the only two below
+        0.5 were the only two words in the clip that were wrong."""
+        job.timeline.words[1] = job.timeline.words[1].model_copy(
+            update={"probability": 0.2}
+        )
+        spoken = next(p for p in job.parts() if p["words"])
+        assert [w["uncertain"] for w in spoken["caption"]] == [False, True, False]
+
+    def test_a_confident_word_is_not_marked(self, job) -> None:
+        spoken = next(p for p in job.parts() if p["words"])
+        assert not any(w["uncertain"] for w in spoken["caption"])

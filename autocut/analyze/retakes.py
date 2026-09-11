@@ -17,6 +17,16 @@ use, and it is also what separates a genuine restart from a deliberate refrain,
 a job the fallback used to do by capping how far apart the two attempts could
 be -- which cut real retakes, because a fluffed sentence runs as long as it
 runs.
+
+There is a limit to what measuring repeated words can confirm, though.  A
+restart is often not a rewording of the abandoned line but a *replacement* for
+it -- "The AutoCut cuts the video into shorter parts." followed by forty words
+that make the same point and share three of them.  No overlap threshold
+separates that from an invented retake.  So the model is also asked to point
+at the good take rather than merely assert one exists, and a proposal survives
+if either the transcript repeats it or the span it names checks out; see
+``_replacement_holds``.  Such spans carry lower confidence, and like every
+other proposal they are offered to a person rather than applied.
 """
 
 from __future__ import annotations
@@ -41,18 +51,28 @@ _CHUNK_OVERLAP = 30
 
 _SYSTEM_PROMPT = """\
 You edit raw talking-head video transcripts. The speaker sometimes fluffs a \
-line, stops, and starts the sentence again. Your job is to find the abandoned \
+line, abandons it, and says it again. Your job is to find the abandoned \
 attempts so they can be cut, leaving the clean take.
 
-You are given the transcript as numbered words. Return JSON only:
+You are given the transcript as numbered words. A marker like [pause 1.2s] \
+after a word is the silence before the next word. A pause noticeably longer \
+than the others is the single strongest sign that what follows is a restart.
+
+Return JSON only:
 {"removals": [{"start": <first word index to cut>, "end": <last word index to \
-cut>, "why": "<a few words>"}]}
+cut>, "replaced_by_start": <first word index of the good take>, \
+"replaced_by_end": <last word index of the good take>, "why": "<a few words>"}]}
 
 Rules:
-- Only mark a span when a LATER part of the transcript says the same thing \
-properly. The good take must remain.
-- Mark false starts, abandoned sentences, and stumbles that are immediately \
-repeated.
+- Only mark a span when a LATER part of the transcript makes the same point \
+properly, and name that later span in replaced_by_start/replaced_by_end. The \
+good take must remain.
+- The good take is usually NOT a verbatim repeat. It is normally reworded, and \
+often several times longer than the attempt it replaces. Judge by meaning, not \
+by matching words: "The tool cuts the video into shorter parts." is replaced by \
+"So this application edits our video, it cuts them into smaller segments and \
+removes the gaps...".
+- Mark false starts, abandoned sentences, and stumbles.
 - Do NOT mark filler words, pauses, or anything merely wordy. Something else \
 handles those.
 - Do NOT rewrite or reorder anything. Only choose spans to delete.
@@ -69,14 +89,44 @@ _SCHEMA = {
                 "properties": {
                     "start": {"type": "integer"},
                     "end": {"type": "integer"},
+                    "replaced_by_start": {"type": "integer"},
+                    "replaced_by_end": {"type": "integer"},
                     "why": {"type": "string"},
                 },
-                "required": ["start", "end"],
+                # Every property is required and none may be added: OpenRouter
+                # passes ``strict: true`` to providers that enforce it, and a
+                # schema they consider incomplete is rejected outright rather
+                # than loosened.
+                "required": [
+                    "start", "end", "replaced_by_start", "replaced_by_end", "why",
+                ],
+                "additionalProperties": False,
             },
         }
     },
     "required": ["removals"],
+    "additionalProperties": False,
 }
+
+
+def _numbered(words: list[Word], pause_marker: float = 0.3) -> str:
+    """The chunk as the model sees it: numbered words, annotated with pauses.
+
+    Without the pauses the model is judging a wall of text, and the thing that
+    most reliably marks a restart is inaudible to it.  In one recording the
+    abandoned line ended on the longest pause in the clip -- 1.14s against a
+    0.26s runner-up -- and no model found it until that number was in the
+    prompt; with it, every model tried found the span exactly.
+    """
+    lines = []
+    for index, word in enumerate(words):
+        line = f"{index}: {word.text}"
+        if index + 1 < len(words):
+            gap = words[index + 1].start - word.end
+            if gap >= pause_marker:
+                line += f"  [pause {gap:.1f}s]"
+        lines.append(line)
+    return "\n".join(lines)
 
 
 class RetakeValidationError(ValueError):
@@ -243,23 +293,78 @@ def _is_superseded(words: list[Word], start: int, end: int, config: RetakeConfig
     ]
 
     span_length = end - start + 1
-    max_window = min(span_length + 4, len(following))
+    # The good take is routinely longer than the attempt it replaces -- it is
+    # the one that got finished -- so the window searched has to be able to
+    # grow well past the span's own length, or a reworded restart is measured
+    # against only its first few words and scores nothing.
+    max_window = min(span_length * 2 + 6, len(following))
     for window_size in range(max(1, span_length - 2), max_window + 1):
         for i in range(len(following) - window_size + 1):
             window_tokens = _content_words(following[i : i + window_size])
             if not window_tokens:
                 continue
             overlap = sum((span_counts & Counter(window_tokens)).values())
-            if overlap / len(span_tokens) >= config.paraphrase_threshold:
+            if overlap / len(span_tokens) >= config.overlap_threshold:
                 return True
     return False
 
 
+def _replacement_holds(
+    words: list[Word], start: int, end: int, item: dict, config: RetakeConfig
+) -> bool:
+    """Whether the model's named good take is a real, later span of transcript.
+
+    ``_is_superseded`` asks the only question a transcript can answer on its
+    own -- do the same words come back? -- and a genuinely reworded retake can
+    answer no.  In one recording "The AutoCut cuts the video into shorter
+    parts." was replaced by forty words that share three content words with
+    it: plainly the same point, and lexically far below any threshold that
+    would still reject an invented retake.
+
+    So the model is asked to point at the good take rather than merely assert
+    one exists, and what is checked here is the pointing.  A model inventing a
+    retake in a clean transcript has nothing to point at and has to fabricate
+    indices, which fail these checks; a model that has actually found one names
+    the span that replaces it.  The checks are structural on purpose -- the
+    claim is *that these later words exist and say it again*, and only the
+    first half of that is verifiable here.  The second half is why such spans
+    are proposed to a person rather than applied, and carry lower confidence
+    than a lexically confirmed one.
+    """
+    try:
+        first = int(item["replaced_by_start"])
+        last = int(item["replaced_by_end"])
+    except (KeyError, TypeError, ValueError):
+        return False
+
+    if not (0 <= first <= last < len(words)):
+        return False
+    # It has to come after the attempt it replaces, and be a separate span:
+    # a "good take" overlapping the cut would be deleted along with it.
+    if first <= end:
+        return False
+    if last - first + 1 < config.min_overlap_words:
+        return False
+    # And it has to follow soon enough to be a restart rather than the speaker
+    # returning to the subject minutes later, which is not a retake.
+    if words[first].start - words[end].end > config.supersede_window:
+        return False
+    return True
+
+
+#: Confidence for a span the transcript itself repeats, and for one only the
+#: model says is replaced.  Both are proposals a person ticks or unticks; the
+#: difference is which gets sacrificed first when the removal budget is blown,
+#: and how loudly the review screen should hedge.
+_CONFIDENCE_REPEATED = 0.7
+_CONFIDENCE_CLAIMED = 0.45
+
+
 def _validate_chunk(
     proposals: list[dict], words: list[Word], offset: int, count: int, config: RetakeConfig
-) -> list[tuple[int, int, str]]:
+) -> list[tuple[int, int, str, float]]:
     """Check one chunk's proposals, returning absolute word index ranges."""
-    accepted: list[tuple[int, int, str]] = []
+    accepted: list[tuple[int, int, str, float]] = []
     for item in proposals:
         try:
             start = int(item["start"])
@@ -283,13 +388,29 @@ def _validate_chunk(
                 )
                 continue
 
-        if not _is_superseded(words, absolute_start, absolute_end, config):
+        # Two ways for the good take to be confirmed.  The transcript repeating
+        # the span's content is the strong one and needs nothing from the
+        # model; the model pointing at a specific later span is the weak one,
+        # and it exists because a reworded retake cannot pass the strong test.
+        if _is_superseded(words, absolute_start, absolute_end, config):
+            confidence = _CONFIDENCE_REPEATED
+        elif _replacement_holds(words, absolute_start, absolute_end, item, config):
+            confidence = _CONFIDENCE_CLAIMED
+            log.info(
+                "retake %r: no lexical repeat, but the model points at words %s-%s",
+                item.get("why", ""), item.get("replaced_by_start"),
+                item.get("replaced_by_end"),
+            )
+        else:
             log.warning(
-                "rejecting retake %r: nothing later repeats it", item.get("why", "")
+                "rejecting retake %r: nothing later repeats or replaces it",
+                item.get("why", ""),
             )
             continue
 
-        accepted.append((absolute_start, absolute_end, str(item.get("why", ""))))
+        accepted.append(
+            (absolute_start, absolute_end, str(item.get("why", "")), confidence)
+        )
     return accepted
 
 
@@ -313,19 +434,20 @@ def _llm_spans(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
         chunk = words[offset : offset + _CHUNK_WORDS]
         if len(chunk) < 8:
             break
-        numbered = "\n".join(f"{i}: {word.text}" for i, word in enumerate(chunk))
-        result = _ask(numbered, config, model)
+        result = _ask(_numbered(chunk), config, model)
         proposals = result.get("removals")
         if not isinstance(proposals, list):
             raise RetakeValidationError(f"'removals' was {type(proposals).__name__}, not a list")
 
-        for start, end, why in _validate_chunk(proposals, words, offset, len(chunk), config):
+        for start, end, why, confidence in _validate_chunk(
+            proposals, words, offset, len(chunk), config
+        ):
             spans.append(
                 RemovalSpan(
                     start=words[start].start,
                     end=words[end].end,
                     reason=Reason.RETAKE,
-                    confidence=0.7,
+                    confidence=confidence,
                     detail=why[:80],
                 )
             )

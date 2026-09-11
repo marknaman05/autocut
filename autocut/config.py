@@ -27,6 +27,15 @@ class SilenceConfig:
     min_gap: float = 0.35
     #: Breathing room left on each side of a removed gap.
     pad: float = 0.12
+    #: Room left after a word that ends a sentence, in place of ``pad``.
+    #: A full stop is not a breath: the pause after it is doing work, and
+    #: trimming it to the same 0.12s as a mid-sentence hesitation is what makes
+    #: an edit sound hurried.  Measured on one recording, the gaps after
+    #: "Cloude." and "AutoCut." arrived in the finished video at 0.12s and
+    #: 0.00s -- each sentence landing directly on the next.  This is a floor,
+    #: not a target: a pause already shorter than this is left exactly as it
+    #: was spoken, and a long one is still tightened, just not past here.
+    sentence_pause: float = 0.5
     #: A noise shorter than this, in the middle of a pause, does not break the
     #: pause in two -- provided it is not sustained speech.  Wide enough to
     #: reach across a cough, which runs a good half-second including its decay.
@@ -108,12 +117,14 @@ class RetakeConfig:
     ollama_host: str = "http://localhost:11434"
 
     # -- openrouter backend ----------------------------------------------
-    #: Default is a fast, cheap model with dependable JSON adherence -- the
-    #: task is short-chunk linguistic judgement and the downstream
-    #: ``_is_superseded`` check catches its misfires, so paying for a frontier
-    #: model buys little.  Swap for ``deepseek/deepseek-v4.1-flash`` to go
-    #: cheaper still, or ``anthropic/claude-opus-5`` for maximum judgement;
-    #: any OpenRouter model id with structured-output support works.
+    #: Default is a fast, cheap model with dependable JSON adherence.  Raw
+    #: ability turned out not to be the bottleneck: on a recording where this
+    #: model missed a retake entirely, so did a frontier one, and both found
+    #: it exactly once the prompt carried the pause lengths between words.
+    #: Swap for ``deepseek/deepseek-v4.1-flash`` to go cheaper still, or
+    #: ``anthropic/claude-sonnet-5`` for the most judgement on ambiguous
+    #: transcripts; any OpenRouter model id with structured-output support
+    #: works.
     openrouter_model: str = "google/gemini-3.8-flash"
     openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
     #: Environment variable the API key is read from, so the key itself never
@@ -133,10 +144,34 @@ class RetakeConfig:
     #: How much of a proposed span's content (function words stripped) must
     #: reappear afterwards for it to count as superseded.  1.0 would require a
     #: verbatim repeat; real retakes are usually paraphrased, so this is looser.
+    #: Tuned against a small local model, which invents retakes freely and
+    #: needs the strict setting to stay safe.
     paraphrase_threshold: float = 0.6
+    #: The same, for a hosted model.  Looser, because it is a different
+    #: trade: a weak local model's false positives are the thing to defend
+    #: against, while a capable hosted one mostly loses real retakes to the
+    #: strict threshold.  Nothing this detector proposes is applied without a
+    #: person ticking it in the review screen, so the cost of the looser
+    #: setting is a row to untick and the cost of the stricter one is a retake
+    #: that is never offered at all.
+    hosted_paraphrase_threshold: float = 0.45
     #: A span with fewer content words than this cannot be judged reliably and
     #: is rejected outright, rather than risking a false match on stopwords.
     min_overlap_words: int = 2
+    #: How long after an abandoned line the good take may begin, when the model
+    #: names it rather than the transcript repeating it.  Longer than
+    #: ``ngram_window``: a restart with different words is often a longer,
+    #: more careful second attempt, and the speaker may take a breath first.
+    supersede_window: float = 45.0
+
+    @property
+    def overlap_threshold(self) -> float:
+        """``paraphrase_threshold``, resolved for the backend in use."""
+        return (
+            self.hosted_paraphrase_threshold
+            if self.backend == "openrouter"
+            else self.paraphrase_threshold
+        )
 
 
 @dataclass(frozen=True)
@@ -176,6 +211,14 @@ class CaptionConfig:
     line_break_gap: float = 0.4
     #: Global nudge applied to every caption, for ASR timing drift.
     offset: float = 0.0
+    #: Below this recogniser confidence, a word is marked for checking in the
+    #: review screen.  Whisper reports a probability per word and it is worth
+    #: believing: on one recording the median word scored 0.99 and only two
+    #: fell below this line -- "Cloud." for "Claude." and "charge" for "star" --
+    #: which were exactly the two words in the clip that were wrong.  Set it
+    #: higher to be shown more doubtful words, lower to be shown almost none;
+    #: it changes nothing about what is rendered, only what is pointed at.
+    review_confidence: float = 0.5
     #: A word must survive at least this much of the cut to be captioned.
     #: Snapping cut points can leave a few milliseconds of a removed word
     #: behind; without this, a cut "um" flashes up for a frame or two.
@@ -274,7 +317,7 @@ class Preset:
         """Tighten hard -- for fast-paced social cuts."""
         return replace(
             self,
-            silence=replace(self.silence, min_gap=0.22, pad=0.06),
+            silence=replace(self.silence, min_gap=0.22, pad=0.06, sentence_pause=0.3),
             retake=replace(self.retake, max_removal_ratio=0.45),
         )
 

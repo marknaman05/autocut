@@ -223,3 +223,81 @@ class TestWordlessSegments:
         segments = [KeepSegment(start=0.0, end=0.1), KeepSegment(start=1.0, end=5.0)]
         kept = merge._drop_glitches(segments, self.preset, None)
         assert [(s.start, s.end) for s in kept] == [(1.0, 5.0)]
+
+
+class TestBreathe:
+    """A sentence gets its beat at any join, whatever made the join.
+
+    The silence detector's own floor only protects a pause it was looking at.
+    A join made by a retake cut or an unticked part can still land the next
+    sentence on the last word of this one -- measured on a real recording,
+    "AutoCut." reached the finished video with 0.00s after it, because the
+    pause that followed it was inside the retake that was removed.
+    """
+
+    PAUSE = 0.5
+
+    def words(self) -> list[Word]:
+        # "done." then a removed stretch, then "Next".  Room tone either side
+        # of the removal is what a beat can be made from.
+        return [
+            Word(text="done.", start=1.0, end=1.5),
+            Word(text="Next", start=6.0, end=6.5),
+        ]
+
+    def test_a_beat_is_borrowed_from_after_the_sentence(self) -> None:
+        # Silence from 1.5 to 3.0; the join is cut hard at 1.5 / 6.0.
+        level = envelope(8.0, [(0.0, 1.5), (3.0, 6.0), (6.5, 8.0)])
+        segments = [KeepSegment(start=0.0, end=1.5), KeepSegment(start=6.0, end=8.0)]
+        out = merge.breathe(segments, self.words(), level, self.PAUSE)
+        assert out[0].end == pytest.approx(1.5 + self.PAUSE, abs=0.02)
+        assert out[1].start == pytest.approx(6.0)
+
+    def test_the_rest_comes_from_before_the_next_sentence(self) -> None:
+        # Only 0.2s of silence after the sentence, but plenty before the next.
+        level = envelope(8.0, [(0.0, 1.5), (1.7, 5.0), (6.5, 8.0)])
+        segments = [KeepSegment(start=0.0, end=1.5), KeepSegment(start=6.0, end=8.0)]
+        out = merge.breathe(segments, self.words(), level, self.PAUSE)
+        assert out[0].end == pytest.approx(1.7, abs=0.02)
+        assert out[1].start == pytest.approx(6.0 - 0.3, abs=0.02)
+
+    def test_nothing_is_borrowed_through_speech(self) -> None:
+        """The removed stretch is speech right up to both edges: there is no
+        room tone to take, and the join stays as the cut made it."""
+        # Room tone only at the far end, so the file has a real noise floor
+        # and the levels mean something -- but none of it is near the join.
+        level = envelope(10.0, [(0.0, 8.0)])
+        segments = [KeepSegment(start=0.0, end=1.5), KeepSegment(start=6.0, end=8.0)]
+        out = merge.breathe(segments, self.words(), level, self.PAUSE)
+        assert [(s.start, s.end) for s in out] == [(0.0, 1.5), (6.0, 8.0)]
+
+    def test_a_breath_is_not_speech(self) -> None:
+        """Room tone a few dB over the silence line -- a breath before the
+        next word -- is allowed inside a beat.  Measured on one recording the
+        three frames before a word sat at -47 to -52 dB against a -53 dB
+        silence threshold, with half a second of deep silence behind them."""
+        level = envelope(8.0, [(0.0, 1.5), (6.5, 8.0)])
+        # A short breath right before "Next": above silence, below speech.
+        breath = level.silence_threshold + 4.0
+        level.db[int(5.9 / FRAME_SECONDS) : int(6.0 / FRAME_SECONDS)] = breath
+        segments = [KeepSegment(start=0.0, end=1.5), KeepSegment(start=6.0, end=8.0)]
+        out = merge.breathe(segments, self.words(), level, self.PAUSE)
+        assert out[0].end == pytest.approx(1.5 + self.PAUSE, abs=0.02)
+
+    def test_a_sentence_that_already_has_its_beat_is_left_alone(self) -> None:
+        level = envelope(8.0, [(0.0, 1.5), (6.5, 8.0)])
+        segments = [KeepSegment(start=0.0, end=2.2), KeepSegment(start=6.0, end=8.0)]
+        out = merge.breathe(segments, self.words(), level, self.PAUSE)
+        assert [(s.start, s.end) for s in out] == [(0.0, 2.2), (6.0, 8.0)]
+
+    def test_a_join_mid_sentence_gets_no_beat(self) -> None:
+        """A retake cut in the middle of a sentence should join tight."""
+        words = [Word(text="and", start=1.0, end=1.5), Word(text="then", start=6.0, end=6.5)]
+        level = envelope(8.0, [(0.0, 1.5), (6.5, 8.0)])
+        segments = [KeepSegment(start=0.0, end=1.5), KeepSegment(start=6.0, end=8.0)]
+        out = merge.breathe(segments, words, level, self.PAUSE)
+        assert [(s.start, s.end) for s in out] == [(0.0, 1.5), (6.0, 8.0)]
+
+    def test_without_an_envelope_nothing_changes(self) -> None:
+        segments = [KeepSegment(start=0.0, end=1.5), KeepSegment(start=6.0, end=8.0)]
+        assert merge.breathe(segments, self.words(), None, self.PAUSE) == segments

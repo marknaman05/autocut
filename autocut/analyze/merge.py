@@ -17,6 +17,7 @@ import logging
 from ..audio import Envelope
 from ..config import Preset
 from ..models import KeepSegment, Reason, RemovalSpan, Word
+from .silence import ends_sentence
 
 log = logging.getLogger(__name__)
 
@@ -168,6 +169,68 @@ def _drop_glitches(
     return kept
 
 
+def breathe(
+    segments: list[KeepSegment],
+    words: list[Word],
+    envelope: Envelope | None,
+    sentence_pause: float,
+) -> list[KeepSegment]:
+    """Give a sentence its beat before the next segment starts.
+
+    The silence detector already refuses to cut into the first
+    ``sentence_pause`` after a full stop (see ``silence.detect``), but that
+    only protects a pause the detector was looking at.  A join made by some
+    other removal -- a retake cut, a part someone unticked -- can still land
+    the next sentence directly on the last word of this one, and measured on
+    a real recording that is what happened: "AutoCut." reached the finished
+    video with 0.00s after it, because the pause that followed it was inside
+    the retake that was removed.
+
+    So this runs over the final segments, whatever produced them, and where a
+    segment ends on a sentence and the next one's first word follows too
+    soon, it borrows room tone to make up the difference: first from just
+    past the segment's end, then from just before the next one's start.
+    Both are audio that a cut threw away, and the only condition on taking it
+    back is that it is genuinely silent -- so the beat can never contain a
+    fragment of whatever was removed.  A pause the source does not have
+    cannot be borrowed, and the join stays as short as the recording made it.
+    """
+    if (
+        envelope is None or not len(envelope.db)
+        or sentence_pause <= 0.0 or len(segments) < 2
+    ):
+        return segments
+
+    out = [segment.model_copy() for segment in segments]
+    for current, following in zip(out, out[1:]):
+        inside = [w for w in words if w.start >= current.start and w.end <= current.end]
+        if not inside or not ends_sentence(inside[-1].text):
+            continue
+        ahead = [w for w in words if w.start >= following.start and w.end <= following.end]
+        # What the join already has: the tail this segment keeps past its last
+        # word, plus whatever the next one keeps before its first.
+        have = current.end - inside[-1].end
+        if ahead:
+            have += ahead[0].start - following.start
+        need = sentence_pause - have
+        if need <= 1e-6:
+            continue
+
+        room = envelope.quiet_run_from(current.end, min(need, following.start - current.end))
+        current.end += room
+        need -= room
+        if need > 1e-6:
+            room = envelope.quiet_run_from(
+                following.start, min(need, following.start - current.end), backwards=True
+            )
+            following.start -= room
+        log.debug(
+            "beat after %r: %.2fs -> %.2fs",
+            inside[-1].text, have, sentence_pause - max(need, 0.0),
+        )
+    return out
+
+
 def coalesce(segments: list[KeepSegment]) -> list[KeepSegment]:
     """Join segments that touch, so a run of them becomes one.
 
@@ -190,7 +253,51 @@ def coalesce(segments: list[KeepSegment]) -> list[KeepSegment]:
     return joined
 
 
-def _pause_splits(words: list[Word], start: float, end: float, min_pause: float) -> list[float]:
+def _relaxed(
+    t: float,
+    envelope: Envelope | None,
+    relax: float,
+    *,
+    forward: bool,
+    floor: float,
+    ceiling: float,
+) -> float:
+    """Move a part boundary off speech and onto quiet audio.
+
+    A pause split lands on a word timestamp, and a word's audible extent is
+    wider than its timestamp says: it begins a little before its start and
+    rings on after its end.  Splicing exactly at the timestamp therefore
+    truncates a decay or clips an onset -- which is what "it cut the last word
+    of the sentence" sounds like, and measured on one recording the end of a
+    part sat at -29 dB, full speech level, with the silence threshold at
+    -53 dB.
+
+    ``forward`` says which way the boundary must travel to protect the speech
+    it belongs to: the end of a part moves later, off the tail of the word
+    before it; the start of a part moves earlier, onto the onset of the word
+    after it.  Either way the move only ever adds audio to a kept part, so the
+    worst case is a few milliseconds too many.  ``floor``/``ceiling`` keep the
+    boundary inside the gap it is splitting, so two splits either side of one
+    pause can never cross.
+    """
+    if envelope is None or relax <= 0.0 or not len(envelope.db):
+        return t
+    moved = (
+        envelope.advance_to_quiet(t, relax)
+        if forward
+        else envelope.retreat_to_quiet(t, relax)
+    )
+    return min(max(moved, floor), ceiling)
+
+
+def _pause_splits(
+    words: list[Word],
+    start: float,
+    end: float,
+    min_pause: float,
+    envelope: Envelope | None = None,
+    relax: float = 0.0,
+) -> list[float]:
     """Times inside ``(start, end)`` where the speaker paused long enough to
     mark a new part.
 
@@ -227,13 +334,32 @@ def _pause_splits(words: list[Word], start: float, end: float, min_pause: float)
 
     splits: list[float] = []
     if inside[0].start - start >= min_pause:
-        splits.append(inside[0].start)
+        # Nothing but silence before it, so the onset may be recovered all the
+        # way back to ``start``.
+        splits.append(
+            _relaxed(inside[0].start, envelope, relax,
+                     forward=False, floor=start, ceiling=inside[0].start)
+        )
     for word, following in zip(inside, inside[1:]):
-        if following.start - word.end >= min_pause:
-            splits.append(word.end)
-            splits.append(following.start)
+        gap = following.start - word.end
+        if gap >= min_pause:
+            # Neither boundary may pass the middle of the gap, so the pause
+            # between them keeps a sliver of itself however much both sides
+            # are relaxed.
+            middle = word.end + gap / 2.0
+            splits.append(
+                _relaxed(word.end, envelope, relax,
+                         forward=True, floor=word.end, ceiling=middle)
+            )
+            splits.append(
+                _relaxed(following.start, envelope, relax,
+                         forward=False, floor=middle, ceiling=following.start)
+            )
     if end - inside[-1].end >= min_pause:
-        splits.append(inside[-1].end)
+        splits.append(
+            _relaxed(inside[-1].end, envelope, relax,
+                     forward=True, floor=inside[-1].end, ceiling=end)
+        )
     return splits
 
 
@@ -243,6 +369,8 @@ def parts(
     words: list[Word] | None = None,
     min_pause: float = 0.0,
     part_pause: float = 0.0,
+    envelope: Envelope | None = None,
+    relax: float = 0.0,
 ) -> list[tuple[float, float, RemovalSpan | None]]:
     """Split the whole timeline into contiguous pieces, in order.
 
@@ -272,7 +400,7 @@ def parts(
     def add_kept(start: float, end: float) -> None:
         cursor = start
         if words:
-            for split in _pause_splits(words, start, end, part_pause):
+            for split in _pause_splits(words, start, end, part_pause, envelope, relax):
                 if split > cursor:
                     pieces.append((cursor, split, None))
                     cursor = split
@@ -353,6 +481,9 @@ def build(
     if not segments:
         log.error("every segment was cut; falling back to the uncut timeline")
         return [KeepSegment(start=0.0, end=duration)], []
+    segments = coalesce(
+        breathe(segments, words or [], envelope, preset.silence.sentence_pause)
+    )
 
     kept = sum(segment.duration for segment in segments)
     log.info(
