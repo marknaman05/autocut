@@ -313,3 +313,83 @@ class TestSilentRuns:
 
     def test_an_empty_envelope_finds_nothing(self) -> None:
         assert Envelope(np.zeros(0, dtype=np.float32)).silent_runs(0.0, 1.0, 0.35) == []
+
+
+class TestSentenceBeat:
+    """A full stop is not a breath.
+
+    The pause after a sentence is doing work, and trimming it to the same
+    0.12s as a mid-sentence hesitation is what makes an edit sound hurried.
+    Measured on a real recording, the gaps after "Cloude." and "AutoCut."
+    reached the finished video at 0.12s and 0.00s -- every sentence landing
+    directly on the next one.
+
+    ``sentence_pause`` is a floor rather than a target: a long pause is still
+    tightened, just never past that mark, and a pause already shorter than it
+    is left exactly as it was spoken.
+    """
+
+    config = SilenceConfig()
+
+    def gap(self, first: str, second: str, pause: float, **overrides):
+        """One word, a pause, another word -- and whatever gets cut out."""
+        config = SilenceConfig(**overrides) if overrides else self.config
+        words = [
+            Word(text=first, start=0.0, end=1.0),
+            Word(text=second, start=1.0 + pause, end=2.0 + pause),
+        ]
+        duration = 3.0 + pause
+        level = envelope(duration, [(1.0, 1.0 + pause)])
+        return silence.detect(words, duration, config, level), words
+
+    def test_a_long_pause_after_a_sentence_keeps_its_beat(self) -> None:
+        spans, words = self.gap("done.", "Next", pause=2.0)
+        cut = next(s for s in spans if s.start >= 1.0 and s.end <= 3.0)
+        # The cut may not begin until a clear half-second past the full stop.
+        assert cut.start == pytest.approx(words[0].end + self.config.sentence_pause)
+
+    def test_a_long_pause_mid_sentence_is_still_trimmed_to_the_pad(self) -> None:
+        """The floor applies to sentences, not to every gap -- a hesitation in
+        the middle of one is exactly what this detector exists to remove."""
+        spans, words = self.gap("and", "then", pause=2.0)
+        cut = next(s for s in spans if s.start >= 1.0 and s.end <= 3.0)
+        assert cut.start == pytest.approx(words[0].end + self.config.pad)
+
+    def test_a_pause_shorter_than_the_beat_is_left_alone(self) -> None:
+        """Nothing to tighten: the speaker already took less than the beat."""
+        spans, _ = self.gap("done.", "Next", pause=0.45)
+        assert not [s for s in spans if s.start >= 1.0 and s.end <= 2.0]
+
+    def test_the_same_pause_mid_sentence_is_cut(self) -> None:
+        """The contrast that shows the rule is doing the work: identical
+        audio, identical timings, and only the full stop differs."""
+        spans, _ = self.gap("and", "then", pause=0.45)
+        assert [s for s in spans if s.start >= 1.0 and s.end <= 2.0]
+
+    def test_a_question_mark_ends_a_sentence_too(self) -> None:
+        spans, words = self.gap("really?", "Yes", pause=2.0)
+        cut = next(s for s in spans if s.start >= 1.0 and s.end <= 3.0)
+        assert cut.start == pytest.approx(words[0].end + self.config.sentence_pause)
+
+    def test_the_last_sentence_gets_its_beat_before_the_video_ends(self) -> None:
+        """Otherwise the video stops the instant the final word does."""
+        words = [Word(text="bye.", start=0.0, end=1.0)]
+        level = envelope(4.0, [(1.0, 4.0)])
+        spans = silence.detect(words, 4.0, self.config, level)
+        trailing = next(s for s in spans if s.detail == "trailing")
+        assert trailing.start == pytest.approx(1.0 + self.config.sentence_pause)
+
+    def test_turning_the_beat_off_restores_the_old_behaviour(self) -> None:
+        spans, words = self.gap("done.", "Next", pause=2.0, sentence_pause=0.0)
+        cut = next(s for s in spans if s.start >= 1.0 and s.end <= 3.0)
+        assert cut.start == pytest.approx(words[0].end + self.config.pad)
+
+
+class TestEndsSentence:
+    @pytest.mark.parametrize("text", ["done.", "really?", "stop!", '"done."', "wait\u2026"])
+    def test_sentence_enders(self, text) -> None:
+        assert silence.ends_sentence(text)
+
+    @pytest.mark.parametrize("text", ["and", "mid,", "well-", "hello"])
+    def test_not_sentence_enders(self, text) -> None:
+        assert not silence.ends_sentence(text)

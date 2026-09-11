@@ -27,6 +27,20 @@ from ..models import Reason, RemovalSpan, Word
 
 log = logging.getLogger(__name__)
 
+#: Trailing characters that do not change whether a word ended a sentence --
+#: Whisper puts the closing quote after the full stop, as anyone would.
+_CLOSERS = "\"')]}\u00bb\u201d\u2019"
+
+
+def ends_sentence(text: str) -> bool:
+    """Whether this word is the last one of a sentence."""
+    return text.rstrip().rstrip(_CLOSERS).endswith((".", "?", "!", "\u2026"))
+
+
+def _floor_after(word: Word, config: SilenceConfig) -> float:
+    """The earliest a cut may start, given the word it follows."""
+    return word.end + config.sentence_pause if ends_sentence(word.text) else 0.0
+
 
 def detect(
     words: list[Word],
@@ -41,11 +55,14 @@ def detect(
     spans: list[RemovalSpan] = []
     has_envelope = envelope is not None and len(envelope.db) > 0
 
-    def cut(start: float, end: float, detail: str) -> None:
+    def cut(start: float, end: float, detail: str, floor: float = 0.0) -> None:
         if end - start <= config.min_gap:
             return
         # Leave breathing room on each side so speech never sounds clipped.
-        cut_start = start + config.pad
+        # ``floor`` is the earliest a cut may begin, which is how a sentence
+        # keeps its beat: after a full stop it sits a good half-second past
+        # the word, so tightening the pause can never take all of it.
+        cut_start = max(start + config.pad, floor)
         cut_end = end - config.pad
         if cut_end - cut_start <= 0.02:
             return
@@ -55,7 +72,14 @@ def detect(
             )
         )
 
-    def consider(start: float, end: float, detail: str, *, transcribed: bool = False) -> None:
+    def consider(
+        start: float,
+        end: float,
+        detail: str,
+        *,
+        transcribed: bool = False,
+        floor: float = 0.0,
+    ) -> None:
         """Cut the dead air in ``[start, end)`` -- not necessarily all of it.
 
         Without a waveform we can only take the transcript's word for it and
@@ -81,7 +105,7 @@ def detect(
         if end - start <= config.min_gap:
             return
         if not has_envelope:
-            cut(start, end, detail)
+            cut(start, end, detail, floor)
             return
 
         runs = envelope.silent_runs(
@@ -90,7 +114,7 @@ def detect(
         )
         if runs:
             for run_start, run_end in runs:
-                cut(run_start, run_end, detail)
+                cut(run_start, run_end, detail, floor)
             return
         if transcribed:
             return
@@ -104,16 +128,23 @@ def detect(
                 start, end, speech,
             )
             return
-        cut(start, end, detail)
+        cut(start, end, detail, floor)
 
     # Leading dead air: trimmed to the pad, not to zero, so the first word has
     # a moment of air before it.
     consider(0.0, words[0].start, "leading")
 
     for previous, following in zip(words, words[1:]):
-        consider(previous.end, following.start, "gap")
+        consider(
+            previous.end, following.start, "gap",
+            floor=_floor_after(previous, config),
+        )
 
-    consider(words[-1].end, duration, "trailing")
+    # The last sentence gets its beat too, rather than the video stopping the
+    # instant the final word does.
+    consider(
+        words[-1].end, duration, "trailing", floor=_floor_after(words[-1], config)
+    )
 
     # Dead air hiding *inside* a word.  Gap-based detection is blind to this:
     # if a word's end timestamp runs on through a pause there is no gap to

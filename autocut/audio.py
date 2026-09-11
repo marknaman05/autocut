@@ -262,6 +262,48 @@ class Envelope:
             return t
         return index * self.frame_seconds
 
+    def quiet_run_from(
+        self,
+        t: float,
+        limit: float,
+        *,
+        backwards: bool = False,
+        level: float | None = None,
+    ) -> float:
+        """How far the audio stays below ``level``, walking from ``t`` up to
+        ``limit``.
+
+        The complement of :meth:`advance_to_quiet`, which walks until the audio
+        *becomes* quiet.  This one starts in silence and measures how much of
+        it there is -- which is what you need to answer "can I borrow half a
+        second of room tone from here?", and the answer has to be no when the
+        silence runs out before the half second does.
+
+        ``level`` defaults to :attr:`speech_confidence_level`, not the silence
+        threshold, and the difference matters.  The silence threshold is set
+        deliberately low so that quiet speech is never *cut*; that caution is
+        the wrong bar for what may be *kept*.  Room tone flutters over it
+        constantly -- measured on one recording the three frames before a word
+        sat at -47 to -52 dB against a -53 dB threshold, a breath, with half a
+        second of deep silence behind them -- and a beat is allowed to contain
+        a breath.  What it may not contain is speech.
+        """
+        if not len(self.db) or limit <= 0.0:
+            return 0.0
+        ceiling = self.speech_confidence_level if level is None else level
+        step = -1 if backwards else 1
+        frames = int(round(limit / self.frame_seconds))
+        index = self._index(t) + (step if backwards else 0)
+        taken = 0
+        for _ in range(frames):
+            if not 0 <= index < len(self.db):
+                break
+            if self.db[index] >= ceiling:
+                break
+            taken += 1
+            index += step
+        return taken * self.frame_seconds
+
     def onset_near(self, t: float, radius: float = 0.12) -> float:
         """The start of the speech burst nearest ``t``.
 
