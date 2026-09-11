@@ -123,3 +123,26 @@ def ingest(source: Path, work_dir: Path) -> Timeline:
         source.name, timeline.duration, timeline.width, timeline.height, timeline.fps,
     )
     return timeline
+
+
+def make_preview(source: Path, destination: Path) -> Path:
+    """A small, browser-friendly copy of the source, for reviewing cuts.
+
+    The original may be in a container or codec no browser will play, and
+    reviewing a proposed cut means hearing it -- so the review UI gets its own
+    H.264/AAC proxy rather than the source file.  Deliberately cheap: it is
+    scrubbed through a few seconds at a time and never seen at full size.
+    """
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    ffmpeg(
+        [
+            "-i", str(source),
+            "-vf", "scale=-2:360",
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "30",
+            "-c:a", "aac", "-b:a", "96k",
+            "-movflags", "+faststart",
+            str(destination),
+        ],
+        description="preview proxy",
+    )
+    return destination

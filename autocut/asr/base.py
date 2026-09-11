@@ -86,6 +86,38 @@ def refine_timings(words: list[Word], envelope: Envelope, *, radius: float = 0.1
     return refined
 
 
+def trim_overlong(
+    words: list[Word], envelope: Envelope, *, max_duration: float, min_gap: float
+) -> list[Word]:
+    """Pull back the end of a word whose timestamp ran on through a pause.
+
+    Whisper anchors a word's start reliably but sometimes lets its end run all
+    the way to the next word, swallowing the pause between them -- a 7-second
+    "that".  Everything downstream then misreads that word: gap-based silence
+    detection sees no gap to cut, and captions measure how much of the word
+    survived against a duration that was never spoken.
+
+    The repair is to trust the leading burst and nothing after it: if a word is
+    implausibly long and falls silent partway through, its real extent ends
+    where that silence begins.  Only over-long words are touched, and the end
+    only ever moves earlier, so a correctly-timed word cannot be damaged.
+    """
+    if not len(envelope.db):
+        return words
+
+    trimmed: list[Word] = []
+    for word in words:
+        if word.duration > max_duration:
+            runs = envelope.silent_runs(word.start, word.end, min_gap)
+            # Only a run that begins *inside* the word marks the end of the
+            # burst; one starting at the very beginning means the timestamp is
+            # wrong in a way this cannot repair, so leave it alone.
+            if runs and runs[0][0] > word.start:
+                word = word.model_copy(update={"end": max(runs[0][0], word.start + 0.02)})
+        trimmed.append(word)
+    return trimmed
+
+
 def save_words(words: list[Word], path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(json.dumps([w.model_dump() for w in words], indent=1))

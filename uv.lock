@@ -41,6 +41,7 @@ dependencies = [
     { name = "numpy" },
     { name = "pillow" },
     { name = "pydantic" },
+    { name = "python-dotenv" },
 ]
 
 [package.optional-dependencies]
@@ -51,6 +52,9 @@ server = [
     { name = "fastapi" },
     { name = "python-multipart" },
     { name = "uvicorn", extra = ["standard"] },
+]
+vad = [
+    { name = "torch" },
 ]
 vision = [
     { name = "opencv-python" },
@@ -69,10 +73,12 @@ requires-dist = [
     { name = "opencv-python", marker = "extra == 'vision'", specifier = ">=4.10" },
     { name = "pillow", specifier = ">=10.3" },
     { name = "pydantic", specifier = ">=2.7" },
+    { name = "python-dotenv", specifier = ">=1.0" },
     { name = "python-multipart", marker = "extra == 'server'", specifier = ">=0.0.9" },
+    { name = "torch", marker = "extra == 'vad'", specifier = ">=2.1" },
     { name = "uvicorn", extras = ["standard"], marker = "extra == 'server'", specifier = ">=0.30" },
 ]
-provides-extras = ["asr", "vision", "server"]
+provides-extras = ["asr", "vad", "vision", "server"]
 
 [package.metadata.requires-dev]
 dev = [{ name = "pytest", specifier = ">=8.2" }]

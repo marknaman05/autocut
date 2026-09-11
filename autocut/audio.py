@@ -60,12 +60,137 @@ class Envelope:
 
     @property
     def silence_threshold(self) -> float:
-        """Anything below this is treated as non-speech.  Sits a little above
-        the measured noise floor, but never so high that quiet speech is cut."""
-        return min(self.noise_floor + 8.0, self.speech_level - 18.0)
+        """Anything below this is treated as non-speech.
+
+        Anchored to how loud the speech is, not to how quiet the room is.
+        Anchoring it to the floor was tried and fails from both directions,
+        because the measured floor is not reliably the room: on a noisy
+        recording the floor sits so close to speech that the threshold lands
+        *beneath* it and no frame in the file is ever silent; on a recording
+        with digitally silent passages the floor is the digital silence, and a
+        threshold just above that reads ordinary room tone as speech.  Both
+        failures are the same shape -- a pause plainly audible to anyone
+        watching comes back uncut -- and neither announces itself.
+
+        Speech level is the stable landmark.  A threshold a good margin below
+        it separates the two populations on quiet and noisy recordings alike;
+        the floor is kept only as a lower bound, and speech itself as an upper
+        one, for the degenerate case where a file has no headroom at all.
+        """
+        # The upper bound matters for a file with no headroom at all, where
+        # the floor bound would otherwise land *above* the signal and call
+        # every frame silent.
+        return min(max(self.speech_level - 25.0, self.noise_floor + 3.0), self.speech_level - 3.0)
 
     def is_silent(self, t: float) -> bool:
         return self.level_at(t) < self.silence_threshold
+
+    @property
+    def midpoint_level(self) -> float:
+        """Halfway between room tone and speech, in dB."""
+        return (self.noise_floor + self.speech_level) / 2.0
+
+    @property
+    def speech_confidence_level(self) -> float:
+        """Above this, a sound is loud enough to be worth protecting as speech.
+
+        Sits well clear of ``silence_threshold``, which is deliberately set low
+        so that quiet speech is never mistaken for silence.  That caution has a
+        cost: room tone flutters over the threshold constantly, and a detector
+        that treats every flutter as speech chops a clean pause into fragments.
+        """
+        return self.silence_threshold + 10.0
+
+    def silent_runs(
+        self,
+        start: float,
+        end: float,
+        min_duration: float,
+        bridge: float = 0.0,
+        sustained: float = 0.3,
+    ) -> list[tuple[float, float]]:
+        """Stretches of ``[start, end)`` at least ``min_duration`` long that sit
+        below the silence threshold.
+
+        Two runs separated by less than ``bridge`` seconds are treated as one,
+        provided the sound between them is not *sustained* at speech level for
+        ``sustained`` seconds.  Without bridging, a breath or a cough in the
+        middle of a long pause splits it into two cuts with a fragment
+        stranded between them -- a worse edit and an audible stutter.
+
+        Loudness cannot make this call.  A cough measured here peaked at
+        -21 dB, louder than three of four stretches of real speech the
+        recogniser had dropped; judging by peak keeps the cough and would have
+        to keep it to stay safe.  What separates them is shape: a cough is one
+        impulse with a 50 ms attack and a decay, while a spoken word holds
+        near speech level for an appreciable fraction of a second.
+        """
+        if not len(self.db):
+            return []
+        lo, hi = self._index(start), self._index(end)
+        if hi <= lo:
+            return []
+
+        quiet = self.db[lo:hi] < self.silence_threshold
+        min_frames = max(int(round(min_duration / self.frame_seconds)), 1)
+
+        runs: list[tuple[float, float]] = []
+        run_start: int | None = None
+        for offset, is_quiet in enumerate(quiet):
+            if is_quiet:
+                if run_start is None:
+                    run_start = offset
+            elif run_start is not None:
+                if offset - run_start >= min_frames:
+                    runs.append((
+                        (lo + run_start) * self.frame_seconds,
+                        (lo + offset) * self.frame_seconds,
+                    ))
+                run_start = None
+        if run_start is not None and len(quiet) - run_start >= min_frames:
+            runs.append((
+                (lo + run_start) * self.frame_seconds,
+                (lo + len(quiet)) * self.frame_seconds,
+            ))
+
+        if bridge <= 0.0 or len(runs) < 2:
+            return runs
+
+        merged = [runs[0]]
+        for run in runs[1:]:
+            previous_end = merged[-1][1]
+            island = run[0] - previous_end
+            held = self.longest_run_above(
+                self.speech_confidence_level, previous_end, run[0]
+            )
+            if island <= bridge and held < sustained:
+                merged[-1] = (merged[-1][0], run[1])
+            else:
+                merged.append(run)
+        return merged
+
+    def longest_run_above(self, level: float, start: float, end: float) -> float:
+        """Duration of the longest unbroken stretch of ``[start, end)`` louder
+        than ``level``.
+
+        Distinguishes a noisy room from speech the recogniser dropped, which a
+        peak or an average cannot: room tone crosses any threshold you pick,
+        but only in isolated frames, while a spoken word holds above it for a
+        appreciable fraction of a second.  Measured across two recordings, the
+        two populations do not overlap -- dropped words ran 0.40s and longer,
+        room tone never exceeded 0.12s.
+        """
+        if not len(self.db):
+            return 0.0
+        lo, hi = self._index(start), self._index(end)
+        if hi <= lo:
+            return 0.0
+
+        longest = current = 0
+        for loud in self.db[lo:hi] > level:
+            current = current + 1 if loud else 0
+            longest = max(longest, current)
+        return longest * self.frame_seconds
 
     def loudest_between(self, start: float, end: float) -> float:
         if not len(self.db):
@@ -75,11 +200,20 @@ class Envelope:
             return float(self.db[lo])
         return float(np.max(self.db[lo : hi + 1]))
 
-    def quietest_time_near(self, t: float, radius: float = 0.06) -> float:
+    def quietest_time_near(
+        self, t: float, radius: float = 0.06, max_level: float | None = None
+    ) -> float:
         """The quietest instant within ``radius`` of ``t``.
 
         Cutting here instead of at an arbitrary sample keeps joins from
         clicking, and moves the boundary by at most a couple of frames.
+
+        ``max_level`` refuses the move when even the quietest instant nearby is
+        louder than that.  Without it, a boundary that lands in the middle of a
+        word gets snapped to the dip between two syllables -- which is a local
+        minimum, but is still speech, so the join clips the word instead of
+        landing cleanly beside it.  A boundary with no quiet audio near it is
+        better left exactly where the detector put it.
         """
         if not len(self.db):
             return t
@@ -87,7 +221,88 @@ class Envelope:
         if hi <= lo:
             return t
         window = self.db[lo : hi + 1]
-        return (lo + int(np.argmin(window))) * self.frame_seconds
+        quietest = int(np.argmin(window))
+        if max_level is not None and window[quietest] >= max_level:
+            return t
+        return (lo + quietest) * self.frame_seconds
+
+    def retreat_to_quiet(self, t: float, limit: float) -> float:
+        """Walk *backwards* from ``t`` to where the audio last went quiet.
+
+        Used to pull the end of a removal off a word it would otherwise clip.
+        A word's onset routinely begins before the timestamp the recogniser
+        gives it, so resuming exactly at that timestamp cuts the front off the
+        word.  Returns ``t`` unchanged if it is already quiet, or if nothing
+        quiet is found within ``limit``.
+        """
+        if not len(self.db) or self.level_at(t) < self.silence_threshold:
+            return t
+        floor = self._index(t - limit)
+        index = self._index(t)
+        while index > floor and self.db[index] >= self.silence_threshold:
+            index -= 1
+        if self.db[index] >= self.silence_threshold:
+            return t
+        return index * self.frame_seconds
+
+    def advance_to_quiet(self, t: float, limit: float) -> float:
+        """Walk *forwards* from ``t`` to where the audio next goes quiet.
+
+        The mirror of :meth:`retreat_to_quiet`, for the start of a removal: a
+        word rings on past the timestamp it ends at, and cutting the instant
+        the timestamp says truncates the tail mid-decay.
+        """
+        if not len(self.db) or self.level_at(t) < self.silence_threshold:
+            return t
+        ceiling = self._index(t + limit)
+        index = self._index(t)
+        while index < ceiling and self.db[index] >= self.silence_threshold:
+            index += 1
+        if self.db[index] >= self.silence_threshold:
+            return t
+        return index * self.frame_seconds
+
+    def quiet_run_from(
+        self,
+        t: float,
+        limit: float,
+        *,
+        backwards: bool = False,
+        level: float | None = None,
+    ) -> float:
+        """How far the audio stays below ``level``, walking from ``t`` up to
+        ``limit``.
+
+        The complement of :meth:`advance_to_quiet`, which walks until the audio
+        *becomes* quiet.  This one starts in silence and measures how much of
+        it there is -- which is what you need to answer "can I borrow half a
+        second of room tone from here?", and the answer has to be no when the
+        silence runs out before the half second does.
+
+        ``level`` defaults to :attr:`speech_confidence_level`, not the silence
+        threshold, and the difference matters.  The silence threshold is set
+        deliberately low so that quiet speech is never *cut*; that caution is
+        the wrong bar for what may be *kept*.  Room tone flutters over it
+        constantly -- measured on one recording the three frames before a word
+        sat at -47 to -52 dB against a -53 dB threshold, a breath, with half a
+        second of deep silence behind them -- and a beat is allowed to contain
+        a breath.  What it may not contain is speech.
+        """
+        if not len(self.db) or limit <= 0.0:
+            return 0.0
+        ceiling = self.speech_confidence_level if level is None else level
+        step = -1 if backwards else 1
+        frames = int(round(limit / self.frame_seconds))
+        index = self._index(t) + (step if backwards else 0)
+        taken = 0
+        for _ in range(frames):
+            if not 0 <= index < len(self.db):
+                break
+            if self.db[index] >= ceiling:
+                break
+            taken += 1
+            index += step
+        return taken * self.frame_seconds
 
     def onset_near(self, t: float, radius: float = 0.12) -> float:
         """The start of the speech burst nearest ``t``.

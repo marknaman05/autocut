@@ -81,6 +81,34 @@ def _cmd_render(args: argparse.Namespace) -> int:
     return 0
 
 
+def _cmd_publish(args: argparse.Namespace) -> int:
+    from . import publish
+
+    posted = publish.backend().publish_reel(
+        Path(args.input), args.caption or "", report=lambda message: print(f"  {message}")
+    )
+    print(posted.permalink or f"published as media {posted.media_id}")
+    return 0
+
+
+def _cmd_instagram(args: argparse.Namespace) -> int:
+    from .publish import instagram
+
+    if args.action == "status":
+        from . import publish
+
+        backend = publish.backend()
+        via = "Upload-Post" if backend is publish.upload_post else "Meta"
+        who = backend.account()
+        print(f"connected as @{who.username} via {via} (account {who.user_id})")
+    else:
+        expires = instagram.refresh_token()
+        days = expires // 86400
+        print(f"token refreshed; it now expires in {days} days.")
+        print(f"Put this in .env to keep it:\n{instagram.TOKEN_ENV}={instagram._token()}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(prog="autocut", description=__doc__)
     parser.add_argument("-v", "--verbose", action="store_true")
@@ -107,6 +135,15 @@ def main(argv: list[str] | None = None) -> int:
         "--preset", choices=("default", "gentle", "aggressive"), default="default"
     )
     render_parser.set_defaults(func=_cmd_render)
+
+    publish_parser = subparsers.add_parser("publish", help="post a finished video to Instagram as a Reel")
+    publish_parser.add_argument("input")
+    publish_parser.add_argument("-c", "--caption", default="")
+    publish_parser.set_defaults(func=_cmd_publish)
+
+    instagram_parser = subparsers.add_parser("instagram", help="check or refresh the Instagram connection")
+    instagram_parser.add_argument("action", choices=("status", "refresh"))
+    instagram_parser.set_defaults(func=_cmd_instagram)
 
     args = parser.parse_args(argv)
     _configure_logging(args.verbose)
