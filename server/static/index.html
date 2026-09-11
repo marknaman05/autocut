@@ -128,6 +128,22 @@
   .tag.untranscribed { border-color: #6b2a2a; color: var(--bad); }
   .cut-text { margin-top: 3px; font-size: 13px; }
   .cut-text q { color: var(--text); }
+  /* A caption word is editable in place: the recogniser mishears names and
+     jargon constantly, and the fix is one word long. */
+  .w {
+    border-radius: 3px; padding: 0 2px; margin: 0 -1px;
+    border-bottom: 1px dashed transparent; cursor: text; white-space: pre;
+  }
+  .w:hover { border-bottom-color: var(--line); }
+  /* The recogniser said so itself: these are the words to read twice. */
+  .w.uncertain { border-bottom: 1px dashed var(--accent); color: var(--accent); }
+  .w.uncertain:focus { color: var(--text); }
+  .w:focus { outline: none; background: #2b323c; border-bottom-color: var(--accent); }
+  .w.saving { opacity: .5; }
+  .w.saved { background: #24402c; transition: background 1.2s ease; }
+  .w.failed { background: #4a2020; }
+  .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
+  .hint .flag { color: var(--accent); font-weight: 400; border-bottom: 1px dashed var(--accent); }
   .cut-text .ctx { color: var(--muted); }
   .cut-text .none { color: var(--muted); font-style: italic; }
   .play {
@@ -138,6 +154,22 @@
   .play:hover { border-color: var(--accent); color: var(--accent); }
   .totals { margin-top: 14px; font-size: 13px; color: var(--muted); }
   .totals b { color: var(--text); }
+
+  /* ---- publish ---- */
+  .publish { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
+  .publish h2 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
+  .publish h2 .hint { margin-left: 6px; }
+  .publish textarea {
+    width: 100%; min-height: 64px; resize: vertical; background: var(--bg);
+    color: var(--text); border: 1px solid var(--line); border-radius: 9px;
+    padding: 8px 10px; font: inherit; font-size: 13px;
+  }
+  .publish textarea:focus { outline: none; border-color: var(--accent); }
+  .publish .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
+  .publish .actions .msg { margin-top: 14px; }
+  .publish a.posted { color: var(--ok); font-weight: 600; }
+  .publish .setup { color: var(--muted); font-size: 13px; }
+  .publish .setup code { color: var(--text); }
 </style>
 </head>
 <body>
@@ -272,7 +304,111 @@ function render(card, job) {
         ${s.words} words &middot; ${s.tracked ? "face tracked" : "centre crop"} &middot;
         rendered in ${s.elapsed}s
       </div>
-      <a class="download" href="/jobs/${card.dataset.id}/result" download>Download</a>`;
+      <a class="download" href="/jobs/${card.dataset.id}/result" download>Download</a>
+      <div class="publish"></div>`;
+    showPublish(card);
+  }
+  if (done && job.publish) renderPublish(card, job.publish);
+}
+
+// ---- Instagram ---------------------------------------------------------
+
+// Looked up once per page: whether a token is set and whom it belongs to.
+// The finished card either offers to publish as that account, or says what
+// is missing.  Checked lazily so a page with nothing finished never asks.
+let instagramStatus = null;
+function instagram() {
+  if (!instagramStatus) instagramStatus = fetch("/instagram").then(r => r.json());
+  return instagramStatus;
+}
+
+async function showPublish(card) {
+  const panel = card.querySelector(".publish");
+  const status = await instagram();
+  if (!status.connected) {
+    panel.innerHTML = `
+      <h2>Instagram</h2>
+      <div class="setup">Not connected: ${escape(status.error)}.
+        Put <code>UPLOAD_POST_API_KEY</code> or <code>INSTAGRAM_ACCESS_TOKEN</code> in <code>.env</code> and restart &mdash; the README says how.</div>`;
+    return;
+  }
+  panel.innerHTML = `
+    <h2>Post to Instagram <span class="hint">as @${escape(status.username)}${status.via === "upload-post" ? " via Upload-Post" : ""}</span></h2>
+    <textarea placeholder="Caption (optional)" maxlength="2200"></textarea>
+    <div class="actions">
+      <button class="primary">Publish as a Reel</button>
+      <span class="msg"></span>
+    </div>`;
+  const button = panel.querySelector("button");
+  button.addEventListener("click", () => publish(card));
+  // The snapshot may already carry a publish from before a reload.
+  if (card.dataset.publish) renderPublish(card, JSON.parse(card.dataset.publish));
+}
+
+async function publish(card) {
+  const id = card.dataset.id;
+  const panel = card.querySelector(".publish");
+  const caption = panel.querySelector("textarea").value;
+  panel.querySelector("button").disabled = true;
+  try {
+    const response = await fetch(`/jobs/${id}/publish`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ caption }),
+    });
+    if (!response.ok) throw new Error(await response.text());
+    renderPublish(card, await response.json());
+  } catch (error) {
+    renderPublish(card, { status: "error", message: "failed", error: String(error) });
+  }
+}
+
+// Publishing is network-bound and lives outside the render worker, so its
+// progress is polled rather than pushed: the job's event stream has already
+// closed by the time there is anything to publish.
+function renderPublish(card, publication) {
+  const panel = card.querySelector(".publish");
+  if (!panel.querySelector("button")) {
+    // The panel is not built yet (the account lookup is still in flight);
+    // stash the state and let showPublish pick it up.
+    card.dataset.publish = JSON.stringify(publication);
+    return;
+  }
+  const button = panel.querySelector("button");
+  const msg = panel.querySelector(".msg");
+  const textarea = panel.querySelector("textarea");
+  msg.classList.toggle("error", publication.status === "error");
+
+  if (publication.status === "published") {
+    button.hidden = true;
+    textarea.disabled = true;
+    msg.innerHTML = publication.permalink
+      ? `<a class="posted" href="${escape(publication.permalink)}" target="_blank" rel="noopener">Posted &mdash; open on Instagram &rarr;</a>`
+      : `<span class="posted">Posted</span>`;
+    return;
+  }
+  if (publication.status === "error") {
+    button.disabled = false;
+    msg.textContent = `${publication.message}: ${publication.error}`;
+    return;
+  }
+  button.disabled = true;
+  msg.textContent = `${publication.message}…`;
+  if (!card.dataset.polling) {
+    card.dataset.polling = "1";
+    const tick = async () => {
+      try {
+        const response = await fetch(`/jobs/${card.dataset.id}/publish`);
+        const latest = await response.json();
+        if (latest.status === "publishing") { setTimeout(tick, 2000); return; }
+        delete card.dataset.polling;
+        renderPublish(card, latest);
+      } catch (error) {
+        delete card.dataset.polling;
+        renderPublish(card, { status: "error", message: "lost contact", error: String(error) });
+      }
+    };
+    setTimeout(tick, 2000);
   }
 }
 
@@ -295,7 +431,9 @@ async function showReview(card, job) {
   panel.innerHTML = `
     <video controls preload="metadata" src="/jobs/${id}/preview"></video>
     <div class="review-head">
-      <h2>Parts of the final video</h2>
+      <h2>Parts of the final video
+        <span class="hint">&middot; click a word to fix it; <b class="flag">marked</b> ones the recogniser doubted</span>
+      </h2>
       <div class="bulk">
         <button data-play="1">&#9654; play the edit</button>
         <button data-all="1">keep all</button>
@@ -322,8 +460,18 @@ async function showReview(card, job) {
     const tag = part.reason
       ? `<span class="tag ${part.reason}">${REASONS[part.reason] || part.reason}</span>`
       : "";
-    const body = part.text
-      ? `<q>${escape(part.text)}</q>`
+    // Every word is its own editable element, keyed by where it sits in the
+    // transcript.  Editing the part's text as one string was the obvious
+    // alternative and cannot work: the caption highlights one word at a time
+    // off per-word timings, so text and timing have to stay in step, and
+    // nothing can say which of a retyped sentence's words is which.
+    const body = part.caption && part.caption.length
+      ? part.caption
+          .map(w => `<span class="w${w.uncertain ? " uncertain" : ""}"` +
+                    ` contenteditable="true" spellcheck="false"` +
+                    (w.uncertain ? ` title="the recogniser was unsure of this word"` : "") +
+                    ` data-index="${w.index}">${escape(w.text)}</span>`)
+          .join(" ")
       : `<span class="none">${escape(part.detail || "no speech")}</span>`;
 
     li.innerHTML = `
@@ -352,6 +500,7 @@ async function showReview(card, job) {
     li.querySelector(".play").addEventListener("click", () => {
       playSpans(video, [[part.start, part.end]]);
     });
+    li.querySelectorAll(".w").forEach(word => bindWord(word, id, card));
     list.appendChild(li);
   }
 
@@ -396,6 +545,75 @@ async function showReview(card, job) {
   });
 
   updateTotals(panel, data.duration);
+}
+
+// One word, editable in place.  A correction is saved the moment focus leaves
+// it, so there is no save button to forget and no draft state to lose -- and
+// the word redraws from what the server stored, not from what was typed.
+function bindWord(word, id, card) {
+  word.dataset.original = word.textContent;
+
+  // Enter commits rather than opening a second line: this is one word, and a
+  // contenteditable left to itself would take a newline literally.
+  word.addEventListener("keydown", event => {
+    if (event.key === "Enter") { event.preventDefault(); word.blur(); }
+    if (event.key === "Escape") {
+      event.preventDefault();
+      word.textContent = word.dataset.original;
+      word.blur();
+    }
+  });
+  // Paste arrives as whatever was copied, markup included; only the text of it
+  // belongs in a caption.
+  word.addEventListener("paste", event => {
+    event.preventDefault();
+    const text = (event.clipboardData || window.clipboardData).getData("text");
+    document.execCommand("insertText", false, text.replace(/\s+/g, " ").trim());
+  });
+
+  word.addEventListener("blur", async () => {
+    const text = word.textContent.trim();
+    if (text === word.dataset.original) { word.textContent = text; return; }
+    if (!text) {
+      // Blank is the one edit that cannot be honoured -- the word still has a
+      // slot on the timeline, and the caption has to put something in it.
+      word.textContent = word.dataset.original;
+      return;
+    }
+
+    word.classList.add("saving");
+    try {
+      const response = await fetch(`/jobs/${id}/captions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ edits: [{ index: Number(word.dataset.index), text }] }),
+      });
+      if (!response.ok) throw new Error(await response.text());
+      const data = await response.json();
+      // Redraw from what was actually stored, so a server-side normalisation
+      // is visible rather than silently disagreeing with the screen.
+      const stored = data.parts
+        .flatMap(part => part.caption || [])
+        .find(w => String(w.index) === word.dataset.index);
+      word.textContent = stored ? stored.text : text;
+      word.dataset.original = word.textContent;
+      // A word that has been read and corrected is no longer one to check,
+      // whatever the recogniser thought of its own guess.
+      word.classList.remove("uncertain");
+      word.removeAttribute("title");
+      word.classList.add("saved");
+      setTimeout(() => word.classList.remove("saved"), 1200);
+    } catch (error) {
+      word.textContent = word.dataset.original;
+      word.classList.add("failed");
+      setTimeout(() => word.classList.remove("failed"), 2000);
+      const msg = card.querySelector(".msg");
+      msg.textContent = `could not save that word: ${error}`;
+      msg.classList.add("error");
+    } finally {
+      word.classList.remove("saving");
+    }
+  });
 }
 
 const keptParts = panel =>

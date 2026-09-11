@@ -21,9 +21,12 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from autocut.analyze import merge
+from autocut.audio import Envelope
 from autocut.config import DEFAULT, Preset
 from autocut.models import Timeline
-from autocut.pipeline import Progress, Result, propose, render_edit
+from autocut.pipeline import Progress, Result, part_envelope, propose, render_edit
+from autocut import publish
+from autocut.publish.instagram import InstagramError
 
 log = logging.getLogger(__name__)
 
@@ -32,6 +35,29 @@ PRESETS = {
     "gentle": DEFAULT.gentle(),
     "aggressive": DEFAULT.aggressive(),
 }
+
+
+@dataclass
+class Publication:
+    """One attempt to put a finished video on Instagram."""
+
+    #: publishing -> published, or error.
+    status: str = "publishing"
+    message: str = "starting"
+    caption: str = ""
+    permalink: str | None = None
+    media_id: str | None = None
+    error: str | None = None
+
+    def snapshot(self) -> dict:
+        return {
+            "status": self.status,
+            "message": self.message,
+            "caption": self.caption,
+            "permalink": self.permalink,
+            "media_id": self.media_id,
+            "error": self.error,
+        }
 
 
 @dataclass
@@ -54,8 +80,17 @@ class Job:
     #: edit can be revised: the proposals never change, the answers do.
     timeline: Timeline | None = None
     keep: list[int] | None = None
+    #: Where the finished video has been sent, if anywhere.  Separate from the
+    #: job's own status: a failed publish does not un-finish a render, and the
+    #: file is still there to download.
+    publish: Publication | None = None
     created: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     subscribers: list[asyncio.Queue] = field(default_factory=list, repr=False)
+    #: Cached by :meth:`envelope`.  The flag is separate from the value so that
+    #: a genuine "no audio on disk" is cached too, rather than re-probed on
+    #: every poll of the review screen.
+    _envelope: Envelope | None = field(default=None, repr=False)
+    _envelope_loaded: bool = field(default=False, repr=False)
 
     def snapshot(self) -> dict:
         """The job as the browser sees it."""
@@ -83,8 +118,24 @@ class Job:
                 "tracked": self.result.tracked,
                 "elapsed": round(self.result.elapsed),
             }
+        if self.publish is not None:
+            data["publish"] = self.publish.snapshot()
         return data
 
+
+    def envelope(self) -> Envelope | None:
+        """The analysis envelope, loaded once and kept.
+
+        Part boundaries are relaxed off speech against it, and ``parts()`` is
+        called on every poll of the review screen; reading the WAV each time
+        would make the list cost as much as the analysis did.
+        """
+        if not self._envelope_loaded:
+            self._envelope = (
+                part_envelope(self.timeline) if self.timeline is not None else None
+            )
+            self._envelope_loaded = True
+        return self._envelope
 
     @property
     def preset_config(self) -> Preset:
@@ -106,11 +157,14 @@ class Job:
             return []
 
         words = self.timeline.words
+        threshold = self.preset_config.caption.review_confidence
         chosen = set(self.keep) if self.keep is not None else None
         pieces = merge.parts(
             self.timeline.removals, self.timeline.duration, words,
             min_pause=self.preset_config.review_min_pause,
             part_pause=self.preset_config.part_pause,
+            envelope=self.envelope(),
+            relax=self.preset_config.boundary_relax,
         )
 
         def in_the_edit(start: float, end: float) -> bool:
@@ -131,7 +185,15 @@ class Job:
 
         parts = []
         for index, (start, end, removal) in enumerate(pieces):
-            inside = [w for w in words if w.start >= start and w.end <= end]
+            # Indices travel with the words: a caption correction names the
+            # word it replaces, and a part is not a stable address for one --
+            # re-running the detectors renumbers the parts, while a word keeps
+            # its place in the transcript.
+            numbered = [
+                (i, w) for i, w in enumerate(words)
+                if w.start >= start and w.end <= end
+            ]
+            inside = [w for _, w in numbered]
             # What starts ticked is the pipeline's own edit decision list, not
             # simply "whatever no detector objected to".  The two differ: a
             # sliver left between two cuts is in neither the removals nor the
@@ -164,6 +226,21 @@ class Job:
                     "duration": round(end - start, 2),
                     "text": " ".join(w.text for w in inside),
                     "words": len(inside),
+                    #: Each word and where it sits in the transcript, so the
+                    #: review screen can offer them one at a time for
+                    #: correction before the captions are drawn.
+                    "caption": [
+                        {
+                            "index": i,
+                            "text": w.text,
+                            #: The recogniser's own doubt about this word.
+                            #: Nothing acts on it -- it marks where to look,
+                            #: which is the difference between proof-reading a
+                            #: transcript and scanning one.
+                            "uncertain": w.probability < threshold,
+                        }
+                        for i, w in numbered
+                    ],
                     #: Why this part is not in the video; absent when it is.
                     "reason": reason,
                     "detail": detail,
@@ -184,6 +261,9 @@ class JobManager:
         #: never start while another job is still transcribing.
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
         self._worker: asyncio.Task | None = None
+        #: In-flight publishes.  Held so the event loop cannot collect a task
+        #: that nothing else references before it finishes.
+        self._publishing: set[asyncio.Task] = set()
 
     def start(self) -> None:
         if self._worker is None or self._worker.done():
@@ -246,6 +326,102 @@ class JobManager:
         await self._queue.put((job.id, "render"))
         self.start()
         return job
+
+    async def edit_captions(self, job: Job, edits: list[dict]) -> Job:
+        """Correct the text of individual words, before anything is rendered.
+
+        Only ``text`` moves.  A word's timing is what the karaoke caption is
+        built on and what every cut was decided against, so a correction that
+        could change it would silently invalidate the edit a person just
+        reviewed -- and the thing being fixed here is a recogniser that heard
+        the word wrong, not one that placed it wrong.  Words cannot be added or
+        removed for the same reason: there is no timing to give a new one.
+
+        The correction is written back to ``timeline.json`` rather than kept in
+        memory, because that file is what the render stage reads.  It is the
+        one thing about the proposal a person is allowed to overwrite: the cuts
+        are a decision to revise, but a misheard word was never right.
+        """
+        if job.timeline is None:
+            raise ValueError("this job has no transcript to correct yet")
+
+        words = list(job.timeline.words)
+        for edit in edits:
+            try:
+                index = int(edit["index"])
+                text = str(edit["text"]).strip()
+            except (KeyError, TypeError, ValueError) as error:
+                raise ValueError(f"malformed correction {edit!r}") from error
+            if not 0 <= index < len(words):
+                raise ValueError(f"no such word: {index}")
+            if not text:
+                raise ValueError("a caption word cannot be blank")
+            words[index] = words[index].model_copy(update={"text": text})
+
+        job.timeline.words = words
+        (job.work_dir / "timeline.json").write_text(
+            job.timeline.model_dump_json(indent=1)
+        )
+        log.info("job %s: corrected %d caption words", job.id, len(edits))
+        self._publish(job)
+        return job
+
+    async def publish(self, job: Job, caption: str) -> Job:
+        """Send a finished video to Instagram, in the background.
+
+        Not queued behind the render worker: publishing is network-bound, not
+        GPU-bound, so there is no reason to make it wait for someone else's
+        transcription.  One publish per job at a time, though -- a second
+        click while the first is uploading would post the video twice.
+        """
+        if job.status != "done" or job.result is None:
+            raise ValueError(f"job is {job.status}, not finished")
+        if job.publish is not None and job.publish.status == "publishing":
+            raise ValueError("this video is already being published")
+        if not publish.configured():
+            raise ValueError("Instagram is not connected; see the README")
+
+        job.publish = Publication(caption=caption)
+        self._publish(job)
+        task = asyncio.create_task(self._publish_to_instagram(job))
+        self._publishing.add(task)
+        task.add_done_callback(self._publishing.discard)
+        return job
+
+    async def _publish_to_instagram(self, job: Job) -> None:
+        publication = job.publish
+        assert publication is not None
+        loop = asyncio.get_running_loop()
+
+        def report(message: str) -> None:
+            def apply() -> None:
+                publication.message = message
+                self._publish(job)
+
+            loop.call_soon_threadsafe(apply)
+
+        try:
+            posted = await asyncio.to_thread(
+                publish.backend().publish_reel,
+                job.result.output,
+                publication.caption,
+                report=report,
+            )
+        except InstagramError as error:
+            log.warning("job %s: publish failed: %s", job.id, error)
+            publication.status, publication.error = "error", str(error)
+            publication.message = "failed"
+        except Exception as error:  # noqa: BLE001 - reported to the browser, not swallowed
+            log.exception("job %s: publish failed", job.id)
+            publication.status, publication.error = "error", str(error)
+            publication.message = "failed"
+        else:
+            publication.status = "published"
+            publication.message = "published"
+            publication.media_id = posted.media_id
+            publication.permalink = posted.permalink
+            log.info("job %s published to Instagram: %s", job.id, posted.permalink)
+        self._publish(job)
 
     def subscribe(self, job: Job) -> asyncio.Queue:
         queue: asyncio.Queue = asyncio.Queue()
