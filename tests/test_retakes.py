@@ -53,6 +53,39 @@ class TestNgramRepeats:
         later = speech("the first thing you should do", start=60.0, pause_before={0})
         assert retakes._ngram_repeats(words + filler + later, self.config) == []
 
+    def test_a_long_restarted_sentence_is_caught(self) -> None:
+        """A fluffed take runs as long as it runs.
+
+        This is the real case from a render where a 15-word abandoned take
+        survived into the output: a word-count cap used to reject any repeat
+        whose attempts were more than ``ngram_size * 3`` words apart, which is
+        an ordinary length for a sentence someone gave up on.
+        """
+        words = speech(
+            "and every few days a report tells you that the hiring pattern has "
+            "changed completely "
+            "and every few days a new report tells me that hiring has "
+            "completely changed",
+            pause_before={15},
+        )
+        spans = retakes._ngram_repeats(words, self.config)
+        assert spans, "the abandoned 15-word take should be found"
+        assert spans[0].start == pytest.approx(words[0].start)
+        assert spans[0].end == pytest.approx(words[14].end)
+
+    def test_an_anaphoric_refrain_is_not_a_retake(self) -> None:
+        """Deliberate repetition for rhythm must survive.
+
+        This is what the word-distance cap was really protecting, and what
+        ``_is_superseded`` now protects instead: each clause repeats the frame
+        but not the content, so no window scores highly enough to be a retake.
+        """
+        words = speech(
+            "one is news one is headlines one is replacing jobs entirely",
+            pause_before={3, 6},
+        )
+        assert retakes._ngram_repeats(words, self.config) == []
+
     def test_clean_speech_produces_nothing(self) -> None:
         words = speech("today we are going to talk about three completely different ideas")
         assert retakes._ngram_repeats(words, self.config) == []
@@ -164,3 +197,112 @@ class TestDetect:
     def test_an_explicit_model_is_used_without_asking_ollama(self) -> None:
         config = RetakeConfig(model="my-model:7b", ollama_host="http://127.0.0.1:1")
         assert retakes.choose_model(config) == "my-model:7b"
+
+
+class TestOpenRouterBackend:
+    """The hosted backend is a different wire format wrapping the same
+    contract: same prompt, same schema, same validation on the way out."""
+
+    config = RetakeConfig(backend="openrouter", timeout=5.0)
+
+    @pytest.fixture
+    def words(self) -> list[Word]:
+        # Long enough that a five-word false start stays under the removal
+        # ceiling -- the ratio guard is exercised in its own test below.
+        return speech(
+            "the first thing you should the first thing you should do is write it "
+            "down before you forget it and then move on to the next item on the list",
+            pause_before={5},
+        )
+
+    def _reply(self, monkeypatch, removals, *, status=200):
+        """Stub urlopen with one OpenRouter-shaped chat completion."""
+        import io
+        import json as _json
+
+        body = _json.dumps(
+            {"choices": [{"message": {"content": _json.dumps({"removals": removals})}}]}
+        ).encode()
+
+        class _Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        captured = {}
+
+        def fake_urlopen(request, timeout=None):
+            captured["url"] = request.full_url
+            captured["headers"] = {k.lower(): v for k, v in request.header_items()}
+            captured["payload"] = _json.loads(request.data)
+            return _Response(body)
+
+        monkeypatch.setattr(retakes.urllib.request, "urlopen", fake_urlopen)
+        return captured
+
+    def test_a_proposal_from_openrouter_is_validated_and_accepted(self, monkeypatch, words) -> None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+        self._reply(monkeypatch, [{"start": 0, "end": 4, "why": "false start"}])
+
+        spans = retakes._llm_spans(words, self.config)
+        assert [s.reason for s in spans] == [Reason.RETAKE]
+        assert spans[0].start == pytest.approx(words[0].start)
+
+    def test_an_invented_retake_is_still_rejected(self, monkeypatch, words) -> None:
+        """The model saying so is not enough -- the transcript has to repeat it."""
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+        self._reply(monkeypatch, [{"start": 10, "end": 14, "why": "invented"}])
+        assert retakes._llm_spans(words, self.config) == []
+
+    def test_the_request_carries_the_key_schema_and_model(self, monkeypatch, words) -> None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+        captured = self._reply(monkeypatch, [])
+        retakes._llm_spans(words, self.config)
+
+        assert captured["headers"]["authorization"] == "Bearer sk-test"
+        assert captured["payload"]["model"] == self.config.openrouter_model
+        assert captured["payload"]["response_format"]["json_schema"]["strict"] is True
+        assert captured["payload"]["temperature"] == 0.0
+
+    def test_a_missing_key_raises_rather_than_calling_out(self, monkeypatch, words) -> None:
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        with pytest.raises(retakes.RetakeValidationError, match="OPENROUTER_API_KEY"):
+            retakes._llm_spans(words, self.config)
+
+    def test_detect_falls_back_when_the_key_is_missing(self, monkeypatch, words) -> None:
+        """A missing key is a config gap, not a crash: the n-gram detector
+        still carries the obvious retakes."""
+        monkeypatch.delenv("OPENROUTER_API_KEY", raising=False)
+        spans = retakes.detect(words, self.config)
+        assert spans and all(s.reason is Reason.NGRAM_REPEAT for s in spans)
+
+    def test_an_http_error_is_turned_into_a_fallback(self, monkeypatch, words) -> None:
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+
+        def boom(request, timeout=None):
+            raise retakes.urllib.error.HTTPError(request.full_url, 429, "slow down", {}, None)
+
+        monkeypatch.setattr(retakes.urllib.request, "urlopen", boom)
+        spans = retakes.detect(words, self.config)
+        assert all(s.reason is Reason.NGRAM_REPEAT for s in spans)
+
+    def test_non_json_content_is_rejected(self, monkeypatch, words) -> None:
+        import io
+
+        monkeypatch.setenv("OPENROUTER_API_KEY", "sk-test")
+
+        class _Response(io.BytesIO):
+            def __enter__(self): return self
+            def __exit__(self, *a): return False
+
+        monkeypatch.setattr(
+            retakes.urllib.request, "urlopen",
+            lambda request, timeout=None: _Response(
+                b'{"choices": [{"message": {"content": "sorry, no JSON here"}}]}'
+            ),
+        )
+        with pytest.raises(retakes.RetakeValidationError):
+            retakes._llm_spans(words, self.config)
+
+    def test_an_unknown_backend_is_an_error(self, words) -> None:
+        with pytest.raises(retakes.RetakeValidationError, match="unknown retake backend"):
+            retakes._llm_spans(words, RetakeConfig(backend="gemini"))

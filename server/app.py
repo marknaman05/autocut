@@ -1,4 +1,10 @@
-"""The local web app: drop a video in, watch it render, download the result.
+"""The local web app: drop a video in, choose the cuts, download the result.
+
+Uploading a video only gets as far as splitting it into parts.  Nothing is
+rendered until someone has been through them and ticked the ones the final
+video is made of -- the detectors are good enough to propose and not good
+enough to decide, and the expensive stages are wasted on an edit that is going
+to be rejected.
 
 Bound to localhost and intended for one person on one machine, so there is no
 authentication and no upload size limit beyond what the pipeline itself
@@ -12,7 +18,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
 
 from .jobs import PRESETS, JobManager
@@ -95,6 +101,54 @@ async def job_events(job_id: str, request: Request) -> StreamingResponse:
         # the progress bar only moves once, at the end.
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+@app.get("/jobs/{job_id}/parts")
+async def job_parts(job_id: str) -> dict:
+    """The timeline split into parts, for choosing what the final video keeps."""
+    job = manager.get(job_id)
+    if job is None:
+        raise HTTPException(404, "no such job")
+    if job.timeline is None:
+        raise HTTPException(409, f"job is {job.status}; nothing to review yet")
+
+    return {
+        "duration": round(job.timeline.duration, 2),
+        "parts": job.parts(),
+    }
+
+
+@app.post("/jobs/{job_id}/render")
+async def render_job(job_id: str, keep: list[int] = Body(..., embed=True)) -> dict:
+    """Stitch the chosen parts, in order, and render them."""
+    job = manager.get(job_id)
+    if job is None:
+        raise HTTPException(404, "no such job")
+    if job.status in ("analyzing", "rendering"):
+        raise HTTPException(409, f"job is already {job.status}")
+
+    try:
+        await manager.approve(job, keep)
+    except ValueError as error:
+        raise HTTPException(400, str(error)) from error
+    return job.snapshot()
+
+
+@app.get("/jobs/{job_id}/preview")
+async def job_preview(job_id: str) -> FileResponse:
+    """The review copy of the source, for hearing a cut before making it."""
+    job = manager.get(job_id)
+    if job is None:
+        raise HTTPException(404, "no such job")
+
+    preview = job.work_dir / "preview.mp4"
+    if not preview.exists():
+        # The proxy is best-effort; fall back to the original, which the
+        # browser may or may not be able to play.
+        if not job.source.exists():
+            raise HTTPException(404, "no preview available")
+        return FileResponse(job.source)
+    return FileResponse(preview, media_type="video/mp4")
 
 
 @app.get("/jobs/{job_id}/result")

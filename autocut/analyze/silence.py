@@ -1,43 +1,31 @@
 """Dead-air detection.
 
-Deliberately driven by *gaps between transcribed words* rather than by raw
-energy thresholding.  A pause between words is exactly what we want to tighten,
-and word boundaries give us that directly; energy thresholds instead fight room
-tone, breaths and mouth noise, and cut into quiet speech.
+Driven by the transcript rather than by raw energy thresholding alone: a pause
+*between words* is what we actually want to tighten, and word boundaries give
+us that directly, where a bare energy threshold has no idea whether the quiet
+stretch it found is a pause worth cutting or a beat inside a sentence.
 
-The waveform is still consulted, but only as a veto: if a "gap" turns out to be
-full of sound, the recogniser probably missed some speech and we leave it be.
+The waveform then decides where, precisely, the dead air is.  Within every
+region the transcript nominates, only the stretches that are genuinely below
+the noise floor are cut.  That distinction matters: a "gap" is frequently part
+silence and part speech the recogniser dropped, and cutting the whole gap
+because most of it was quiet deletes the words that were in it.
+
+Two kinds of region are nominated.  The obvious one is the gap between two
+words, plus the head and tail of the video.  The other is the inside of a word
+whose timestamp is implausibly long -- see ``asr.base.trim_overlong``, which
+repairs the common case, but a word can also fall silent in the middle.
 """
 
 from __future__ import annotations
 
 import logging
 
-import numpy as np
-
 from ..audio import Envelope
 from ..config import SilenceConfig
 from ..models import Reason, RemovalSpan, Word
 
 log = logging.getLogger(__name__)
-
-#: If more than this fraction of a gap is above the silence threshold, treat it
-#: as missed speech rather than dead air and leave it alone.
-_VOICED_VETO = 0.5
-
-
-def _is_actually_silent(envelope: Envelope | None, start: float, end: float) -> bool:
-    if envelope is None or not len(envelope.db):
-        return True
-    lo, hi = envelope._index(start), envelope._index(end)
-    if hi <= lo:
-        return True
-    window = envelope.db[lo:hi]
-    voiced = float(np.mean(window > envelope.silence_threshold))
-    if voiced > _VOICED_VETO:
-        log.debug("gap %.2f-%.2f is %.0f%% voiced; not cutting", start, end, voiced * 100)
-        return False
-    return True
 
 
 def detect(
@@ -51,8 +39,9 @@ def detect(
         return []
 
     spans: list[RemovalSpan] = []
+    has_envelope = envelope is not None and len(envelope.db) > 0
 
-    def consider(start: float, end: float, detail: str) -> None:
+    def cut(start: float, end: float, detail: str) -> None:
         if end - start <= config.min_gap:
             return
         # Leave breathing room on each side so speech never sounds clipped.
@@ -60,13 +49,62 @@ def detect(
         cut_end = end - config.pad
         if cut_end - cut_start <= 0.02:
             return
-        if not _is_actually_silent(envelope, start, end):
-            return
         spans.append(
             RemovalSpan(
                 start=cut_start, end=cut_end, reason=Reason.SILENCE, detail=detail
             )
         )
+
+    def consider(start: float, end: float, detail: str, *, transcribed: bool = False) -> None:
+        """Cut the dead air in ``[start, end)`` -- not necessarily all of it.
+
+        Without a waveform we can only take the transcript's word for it and
+        cut the whole region.  With one, we prefer to cut just the stretches
+        that fall below the silence threshold, so speech the recogniser missed
+        survives even though no word was transcribed over it.
+
+        When no stretch falls below the threshold at all, the waveform has not
+        proved there is speech here -- only that the room is loud.  Deciding
+        that means "leave it alone" hands the whole judgement to an energy
+        threshold, which is precisely what this detector is built to avoid: on
+        a noisy recording nothing is ever below threshold and every pause
+        survives.  So the transcript gets the final word, unless the region
+        holds a *sustained* run at speech level, which is what dropped words
+        actually look like.
+
+        That last step applies only where the transcript claims nothing is
+        spoken.  ``transcribed`` marks a region the recogniser placed a word
+        over -- the inside of an over-long word -- and there the waveform must
+        prove silence before anything is cut, or a noisy recording would have
+        the middles of its words removed.
+        """
+        if end - start <= config.min_gap:
+            return
+        if not has_envelope:
+            cut(start, end, detail)
+            return
+
+        runs = envelope.silent_runs(
+            start, end, config.min_gap,
+            bridge=config.bridge, sustained=config.sustained_speech,
+        )
+        if runs:
+            for run_start, run_end in runs:
+                cut(run_start, run_end, detail)
+            return
+        if transcribed:
+            return
+
+        speech = envelope.longest_run_above(
+            envelope.speech_confidence_level, start, end
+        )
+        if speech >= config.sustained_speech:
+            log.debug(
+                "leaving %.2f-%.2f: holds %.2fs of speech-level audio",
+                start, end, speech,
+            )
+            return
+        cut(start, end, detail)
 
     # Leading dead air: trimmed to the pad, not to zero, so the first word has
     # a moment of air before it.
@@ -77,5 +115,15 @@ def detect(
 
     consider(words[-1].end, duration, "trailing")
 
+    # Dead air hiding *inside* a word.  Gap-based detection is blind to this:
+    # if a word's end timestamp runs on through a pause there is no gap to
+    # find, and the pause survives into the render.  Only implausibly long
+    # words are scanned, so a normally-timed word is never picked apart.
+    if has_envelope:
+        for word in words:
+            if word.duration > config.max_word_duration:
+                consider(word.start, word.end, "within-word", transcribed=True)
+
+    spans.sort(key=lambda span: span.start)
     log.info("silence detector proposed %d spans", len(spans))
     return spans

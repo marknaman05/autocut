@@ -4,3 +4,11 @@ __pycache__/
 *.pyc
 samples/build/
 .pytest_cache/
+.env
+
+# Local test recordings -- personal videos used for manual verification,
+# not part of the checked-in fixture set (see samples/). Too large for a
+# normal push (one runs to ~480MB) and not needed for anyone else to run
+# the suite. tests/js/ holds source files, not media, so it is unaffected.
+tests/*.mov
+tests/*.mp4

@@ -8,6 +8,7 @@ problem, and a run can be resumed from any of them.
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from collections.abc import Callable
@@ -15,11 +16,13 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .analyze import fillers, merge, punchins, retakes, silence
-from .asr import get_transcriber, load_words, refine_timings, save_words
+from .asr import get_transcriber, load_words, refine_timings, save_words, trim_overlong
+from .asr import vad
 from .audio import Envelope
 from .config import DEFAULT, Preset
-from .ingest import ingest
-from .models import RemovalSpan, Timeline, ZoomSpan
+from .ffmpeg import FFmpegError
+from .ingest import ingest, make_preview
+from .models import KeepSegment, RemovalSpan, Timeline, Word, ZoomSpan
 from .render import captions as captions_module
 from .render import cut, encode, reframe
 
@@ -37,15 +40,24 @@ ProgressCallback = Callable[[Progress], None]
 
 #: Stage weights, used to turn stage completion into an overall percentage.
 #: Transcription and the final encode dominate; the rest is nearly instant.
-_WEIGHTS = {
-    "ingest": 4,
-    "transcribe": 38,
-    "analyze": 6,
-    "cut": 16,
-    "track": 12,
-    "captions": 6,
-    "compose": 18,
+#:
+#: Split by phase, because the two halves are driven separately: proposing an
+#: edit runs on upload, and rendering one runs when a person has approved it.
+#: Each phase reports 0-100 over its own stages, so a progress bar is
+#: meaningful without knowing which phase it belongs to.
+_PROPOSE_WEIGHTS = {
+    "ingest": 5,
+    "transcribe": 78,
+    "analyze": 5,
+    "preview": 12,
 }
+_RENDER_WEIGHTS = {
+    "cut": 31,
+    "track": 23,
+    "captions": 11,
+    "compose": 35,
+}
+_WEIGHTS = {**_PROPOSE_WEIGHTS, **_RENDER_WEIGHTS}
 
 
 @dataclass
@@ -66,18 +78,22 @@ class Result:
 class _Reporter:
     """Turns per-stage completion into a monotonic overall percentage."""
 
-    def __init__(self, callback: ProgressCallback | None) -> None:
+    def __init__(
+        self, callback: ProgressCallback | None, weights: dict[str, int] | None = None
+    ) -> None:
         self.callback = callback
+        self.weights = weights or _WEIGHTS
+        self.total = sum(self.weights.values()) or 1
         self.completed = 0
 
     def __call__(self, stage: str, message: str) -> None:
-        percent = min(int(self.completed * 100 / sum(_WEIGHTS.values())), 99)
+        percent = min(int(self.completed * 100 / self.total), 99)
         log.info("[%3d%%] %s: %s", percent, stage, message)
         if self.callback:
             self.callback(Progress(stage=stage, percent=percent, message=message))
 
     def finish(self, stage: str) -> None:
-        self.completed += _WEIGHTS.get(stage, 0)
+        self.completed += self.weights.get(stage, 0)
 
 
 def analyze(timeline: Timeline, preset: Preset, envelope: Envelope | None) -> list[RemovalSpan]:
@@ -89,19 +105,13 @@ def analyze(timeline: Timeline, preset: Preset, envelope: Envelope | None) -> li
     return proposals
 
 
-def run(
-    source: Path,
-    work_dir: Path,
-    preset: Preset = DEFAULT,
-    on_progress: ProgressCallback | None = None,
-    output_name: str = "final.mp4",
-) -> Result:
-    """Take a raw video all the way to a finished vertical cut."""
-    started = time.monotonic()
-    work_dir = Path(work_dir)
-    work_dir.mkdir(parents=True, exist_ok=True)
-    report = _Reporter(on_progress)
+EDIT_FILE = "edit.json"
 
+
+def _prepare(
+    source: Path, work_dir: Path, preset: Preset, report: _Reporter
+) -> tuple[Timeline, Envelope | None]:
+    """Ingest and transcribe -- everything needed before cuts can be proposed."""
     report("ingest", "reading the video")
     timeline = ingest(Path(source), work_dir)
     envelope = Envelope.from_wav(timeline.audio) if timeline.audio else None
@@ -121,20 +131,111 @@ def run(
             words = refine_timings(words, envelope)
         timeline.words = words
         save_words(words, transcript_path)
+
+    # Applied to a reused transcript too, not just a fresh one: this repairs
+    # ASR timestamps, and a cached transcript has exactly the same broken ones.
+    # Every repair here only ever shortens a word, so running it twice is a
+    # no-op.
+    timeline.words = _repair_timings(timeline.words, timeline.audio, preset, envelope)
     report.finish("transcribe")
     report("transcribe", f"{len(timeline.words)} words")
+    return timeline, envelope
+
+
+def _repair_timings(
+    words: list[Word],
+    audio: Path | None,
+    preset: Preset,
+    envelope: Envelope | None,
+) -> list[Word]:
+    """Pull each word back to the part of it that is actually spoken.
+
+    A voice detector does this far better than the waveform can -- measured
+    across three recordings, word onsets ran 0.39-0.90s early, well beyond the
+    0.12s the envelope-based nudge is able to search -- so it is tried first.
+    The envelope remains the fallback, because the detector is optional and a
+    render must never fail for want of it.
+    """
+    if preset.vad.enabled and audio is not None:
+        try:
+            track = vad.analyse(audio, threshold=preset.vad.threshold)
+            return vad.align_to_speech(
+                words,
+                track,
+                max_shift=preset.vad.max_shift,
+                trim_longer_than=preset.silence.max_word_duration,
+            )
+        except vad.VADUnavailable as error:
+            log.warning("voice detector unusable (%s); falling back to the waveform", error)
+
+    if envelope is not None:
+        return trim_overlong(
+            words,
+            envelope,
+            max_duration=preset.silence.max_word_duration,
+            min_gap=preset.silence.min_gap,
+        )
+    return words
+
+
+def propose(
+    source: Path,
+    work_dir: Path,
+    preset: Preset = DEFAULT,
+    on_progress: ProgressCallback | None = None,
+    preview: bool = True,
+) -> Timeline:
+    """Work out which cuts to offer, and stop there.
+
+    This is the half of the pipeline that runs before anyone has decided
+    anything.  It ends with a set of proposed removals written to
+    ``timeline.json``, which is the record of what the detectors suggested --
+    never overwritten afterwards, so an edit can be reviewed again and revised.
+
+    The expensive stages deliberately sit on the other side of that decision:
+    nothing is rendered until a person has said what to cut.
+    """
+    work_dir = Path(work_dir)
+    work_dir.mkdir(parents=True, exist_ok=True)
+    report = _Reporter(on_progress, _PROPOSE_WEIGHTS)
+
+    timeline, envelope = _prepare(Path(source), work_dir, preset, report)
 
     report("analyze", "finding cuts")
     proposals = analyze(timeline, preset, envelope)
-    segments, applied = merge.build(proposals, timeline.duration, preset, envelope)
+    segments, applied = merge.build(
+        proposals, timeline.duration, preset, envelope, timeline.words
+    )
     timeline.keep_segments = segments
     timeline.removals = applied
     (work_dir / "timeline.json").write_text(timeline.model_dump_json(indent=1))
     report.finish("analyze")
     report(
         "analyze",
-        f"{len(applied)} cuts, {timeline.duration - timeline.kept_duration:.1f}s removed",
+        f"{len(applied)} cuts proposed, {timeline.duration - timeline.kept_duration:.1f}s",
     )
+
+    if preview:
+        report("preview", "building the review copy")
+        try:
+            make_preview(Path(timeline.source), work_dir / "preview.mp4")
+        except FFmpegError as error:
+            # The review UI degrades to text without it; not worth failing for.
+            log.warning("could not build the preview proxy: %s", error)
+    report.finish("preview")
+    return timeline
+
+
+def _finish(
+    timeline: Timeline,
+    work_dir: Path,
+    preset: Preset,
+    report: _Reporter,
+    output_name: str,
+    started: float,
+) -> Result:
+    """Cut, reframe, caption and encode an edit that has been decided."""
+    segments = timeline.keep_segments
 
     report("cut", "applying the edit")
     cut_path = cut.apply_cuts(
@@ -174,3 +275,81 @@ def run(
         output=output, timeline=timeline, zooms=zooms,
         tracked=track is not None, elapsed=elapsed,
     )
+
+
+def render_edit(
+    work_dir: Path,
+    keep: list[int],
+    preset: Preset = DEFAULT,
+    on_progress: ProgressCallback | None = None,
+    output_name: str = "final.mp4",
+) -> Result:
+    """Render the parts a person chose to keep, indexed into ``merge.parts``.
+
+    ``keep`` names pieces of the timeline to stitch, in order -- what the final
+    video is made of, rather than what was taken out of it.  Adjacent pieces
+    are joined, so a stretch nobody split stays one segment and the punch-in
+    scheduler does not see an edit where there is none.
+
+    The proposal record in ``timeline.json`` is left untouched, so the same job
+    can be reviewed again with different answers.
+    """
+    started = time.monotonic()
+    work_dir = Path(work_dir)
+    report = _Reporter(on_progress, _RENDER_WEIGHTS)
+
+    timeline = Timeline(**json.loads((work_dir / "timeline.json").read_text()))
+    pieces = merge.parts(
+        timeline.removals, timeline.duration, timeline.words,
+        min_pause=preset.review_min_pause,
+        part_pause=preset.part_pause,
+    )
+    chosen = set(keep)
+    segments = merge.coalesce(
+        [
+            KeepSegment(start=start, end=end)
+            for index, (start, end, _) in enumerate(pieces)
+            if index in chosen
+        ]
+    )
+    if not segments:
+        log.error("no parts were kept; falling back to the uncut timeline")
+        segments = [KeepSegment(start=0.0, end=timeline.duration)]
+
+    timeline.keep_segments = segments
+    (work_dir / EDIT_FILE).write_text(
+        json.dumps(
+            {
+                "keep": sorted(chosen),
+                "keep_segments": [s.model_dump() for s in segments],
+            },
+            indent=1,
+        )
+    )
+    log.info(
+        "stitching %d of %d parts into %d segments: %.1fs of %.1fs kept",
+        len(chosen), len(pieces), len(segments),
+        timeline.kept_duration, timeline.duration,
+    )
+    return _finish(timeline, work_dir, preset, report, output_name, started)
+
+
+def run(
+    source: Path,
+    work_dir: Path,
+    preset: Preset = DEFAULT,
+    on_progress: ProgressCallback | None = None,
+    output_name: str = "final.mp4",
+) -> Result:
+    """Take a raw video all the way to a finished vertical cut, unattended.
+
+    Every proposed cut is applied.  The web app splits this in two so a person
+    can decide; the command line renders straight through.
+    """
+    started = time.monotonic()
+    work_dir = Path(work_dir)
+    report = _Reporter(on_progress)
+
+    timeline = propose(source, work_dir, preset, on_progress, preview=False)
+    report.completed = sum(_PROPOSE_WEIGHTS.values()) - _PROPOSE_WEIGHTS["preview"]
+    return _finish(timeline, work_dir, preset, report, output_name, started)

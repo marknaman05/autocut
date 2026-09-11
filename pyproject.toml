@@ -11,11 +11,21 @@ dependencies = [
     # is built without it, and this keeps the pipeline independent of which
     # ffmpeg build happens to be installed.
     "pillow>=10.3",
+    # Loads a .env file at startup so the retake backend's API key and the
+    # AUTOCUT_* switches don't have to be exported by hand.
+    "python-dotenv>=1.0",
 ]
 
 [project.optional-dependencies]
 asr = [
     "mlx-whisper>=0.4.0",
+]
+# Voice activity detection, used to repair the recogniser's word timings.
+# Optional: without it the timings are repaired against the energy envelope,
+# which is less accurate but never fails. torch already arrives with `asr`;
+# this declares the dependency for anyone installing the two separately.
+vad = [
+    "torch>=2.1",
 ]
 # Face tracking. YuNet runs through OpenCV's own dnn module, so no
 # second vision framework is needed.

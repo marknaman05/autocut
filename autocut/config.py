@@ -6,7 +6,19 @@ can be re-run with different aggressiveness without touching code.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field, replace
+
+try:
+    # A .env file in the working directory is the intended place for
+    # OPENROUTER_API_KEY and the AUTOCUT_* switches -- this is a local
+    # single-user tool, so a dotfile beats exporting vars by hand.  Values
+    # already in the real environment win over the file.
+    from dotenv import load_dotenv
+
+    load_dotenv()
+except ModuleNotFoundError:  # pragma: no cover - dotenv is a declared dep
+    pass
 
 
 @dataclass(frozen=True)
@@ -15,6 +27,19 @@ class SilenceConfig:
     min_gap: float = 0.35
     #: Breathing room left on each side of a removed gap.
     pad: float = 0.12
+    #: A noise shorter than this, in the middle of a pause, does not break the
+    #: pause in two -- provided it is not sustained speech.  Wide enough to
+    #: reach across a cough, which runs a good half-second including its decay.
+    bridge: float = 1.0
+    #: How long audio must hold at speech level to count as a spoken word
+    #: rather than a noise.  Measured across three recordings, a cough and
+    #: room tone held 0.00-0.19s while speech the recogniser dropped held
+    #: 0.37-1.05s; this sits in the gap between those two populations.
+    sustained_speech: float = 0.3
+    #: A word longer than this is treated as suspect: no single word is spoken
+    #: for a second, so the timestamp has almost certainly run on through a
+    #: pause.  Such words are scanned internally for dead air.
+    max_word_duration: float = 0.8
 
 
 @dataclass(frozen=True)
@@ -43,8 +68,34 @@ class FillerConfig:
 
 
 @dataclass(frozen=True)
+class VADConfig:
+    """Voice activity detection, used to repair the recogniser's word timings.
+
+    Whisper places a word's text reliably and its boundaries poorly.  Correcting
+    them against the energy envelope can only ask "is this loud?", which has no
+    stable answer across recordings; a voice detector asks "is this a voice?".
+    """
+
+    enabled: bool = True
+    #: Frame probability at or above which a frame is counted as speech.
+    threshold: float = 0.5
+    #: How far a word edge may travel to reach the nearest voice.  A word with
+    #: no voice within this distance is left as the recogniser placed it.
+    max_shift: float = 1.0
+
+
+@dataclass(frozen=True)
 class RetakeConfig:
     enabled: bool = True
+    #: Which LLM proposes retakes.  ``"ollama"`` talks to a local model and
+    #: needs nothing set up beyond Ollama itself; ``"openrouter"`` calls a
+    #: hosted model over the OpenRouter API and wants ``OPENROUTER_API_KEY`` in
+    #: the environment.  Either way the n-gram detector still runs underneath
+    #: and every proposal goes through the same validation, so a missing key or
+    #: a bad response degrades to the deterministic path rather than failing.
+    backend: str = "ollama"
+
+    # -- ollama backend -----------------------------------------------------
     #: Leave as None to use the best model Ollama actually has installed;
     #: naming one that is not pulled would silently fall back to the n-gram
     #: detector on every run.
@@ -55,6 +106,20 @@ class RetakeConfig:
         "qwen3:8b", "qwen2.5:7b", "llama3.1:8b", "gemma3:4b", "llama3.2:3b",
     )
     ollama_host: str = "http://localhost:11434"
+
+    # -- openrouter backend ----------------------------------------------
+    #: Default is a fast, cheap model with dependable JSON adherence -- the
+    #: task is short-chunk linguistic judgement and the downstream
+    #: ``_is_superseded`` check catches its misfires, so paying for a frontier
+    #: model buys little.  Swap for ``deepseek/deepseek-v4.1-flash`` to go
+    #: cheaper still, or ``anthropic/claude-opus-5`` for maximum judgement;
+    #: any OpenRouter model id with structured-output support works.
+    openrouter_model: str = "google/gemini-3.8-flash"
+    openrouter_url: str = "https://openrouter.ai/api/v1/chat/completions"
+    #: Environment variable the API key is read from, so the key itself never
+    #: lands in a preset or a checked-in config.
+    api_key_env: str = "OPENROUTER_API_KEY"
+
     timeout: float = 120.0
     #: Reject the whole LLM plan if it wants to remove more than this fraction
     #: of speech -- a runaway local model should cut nothing, not everything.
@@ -154,6 +219,7 @@ class Preset:
     """The complete configuration for one render."""
 
     silence: SilenceConfig = field(default_factory=SilenceConfig)
+    vad: VADConfig = field(default_factory=VADConfig)
     filler: FillerConfig = field(default_factory=FillerConfig)
     retake: RetakeConfig = field(default_factory=RetakeConfig)
     punchin: PunchInConfig = field(default_factory=PunchInConfig)
@@ -168,6 +234,29 @@ class Preset:
 
     #: Keep segments shorter than this read as glitches and are dropped.
     min_segment: float = 0.25
+    #: How far a cut boundary may be nudged to land on quiet audio rather than
+    #: on a word's onset or its ringing tail, which the recogniser's timestamps
+    #: do not cover.  Only ever shrinks a removal, so the cost of being wrong
+    #: is a few milliseconds kept, not speech destroyed.
+    boundary_relax: float = 0.25
+    #: The shortest silence worth offering as its own decision in review.
+    #: Pauses below this are left in the video: the beat between two sentences
+    #: is rhythm rather than dead air, and listing every one of them buries the
+    #: cuts that matter under decisions nobody wants to make.
+    review_min_pause: float = 1.0
+    #: How long a pause has to be before it starts a new part.  Applies to any
+    #: gap between two words, not only ones at a sentence end -- a pause with
+    #: no punctuation before it, longer than every ordinary pause in the clip,
+    #: is what dropped speech looks like from the transcript's side, and it
+    #: needs a part boundary just as much as a real sentence break does.
+    part_pause: float = 0.35
+    #: A keep segment containing no complete word has to be at least this long
+    #: to be worth keeping.  Below it, the segment is debris left between two
+    #: cuts -- a breath, or the clipped tail of a word that was removed -- and
+    #: splicing it between them is what makes an edit sound abrupt.  Generous,
+    #: because a stretch this long with no word in it is usually speech the
+    #: recogniser dropped, which must survive.
+    min_wordless_segment: float = 1.0
     #: Refuse to remove more than this fraction of the video, whatever the
     #: detectors say -- a last line of defence over all of them combined.
     max_total_removal_ratio: float = 0.6
@@ -190,4 +279,19 @@ class Preset:
         )
 
 
-DEFAULT = Preset()
+def _retake_from_env(retake: RetakeConfig) -> RetakeConfig:
+    """Let the environment pick the retake backend without touching a preset.
+
+    ``AUTOCUT_RETAKE_BACKEND=openrouter`` (with ``OPENROUTER_API_KEY`` set) is
+    all it takes to move retake detection off the local model; a preset can
+    still override this by setting ``retake=`` explicitly.
+    """
+    updates: dict[str, object] = {}
+    if backend := os.environ.get("AUTOCUT_RETAKE_BACKEND"):
+        updates["backend"] = backend
+    if model := os.environ.get("AUTOCUT_RETAKE_MODEL"):
+        updates["openrouter_model"] = model
+    return replace(retake, **updates) if updates else retake
+
+
+DEFAULT = replace(Preset(), retake=_retake_from_env(Preset().retake))

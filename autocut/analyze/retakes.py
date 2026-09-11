@@ -9,16 +9,21 @@ less than it could have.
 
 The deterministic fallback exploits the structure of a real retake: when you
 fluff a line you restart it, so the same run of words appears twice within a
-few seconds.  The LLM path is looser -- ``_is_superseded`` accepts a paraphrase,
-not just a verbatim repeat -- because that guard is what stands between a weak
-local model and a false cut, so it has to catch the retakes the model is
-actually good at finding, not just the ones the n-gram detector already gets.
+few seconds.  That repeated run is only the anchor, though -- what confirms a
+retake is ``_is_superseded``, which asks whether the good take says the same
+thing again, and accepts a paraphrase rather than demanding a verbatim repeat.
+Both paths go through it: it is the guard that makes a weak local model safe to
+use, and it is also what separates a genuine restart from a deliberate refrain,
+a job the fallback used to do by capping how far apart the two attempts could
+be -- which cut real retakes, because a fluffed sentence runs as long as it
+runs.
 """
 
 from __future__ import annotations
 
 import json
 import logging
+import os
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -152,6 +157,63 @@ def _ask_ollama(prompt: str, model: str, config: RetakeConfig) -> dict:
         raise RetakeValidationError(f"model did not return JSON: {content[:200]!r}") from error
 
 
+def _ask_openrouter(prompt: str, config: RetakeConfig) -> dict:
+    """Ask a hosted model, via OpenRouter's OpenAI-compatible chat endpoint.
+
+    The wire format differs from Ollama's -- ``response_format`` rather than
+    ``format``, the reply nested one level deeper -- but nothing else does: the
+    same system prompt, the same numbered-word input, the same JSON schema
+    back.  Every proposal it returns still goes through ``_validate_chunk``.
+    """
+    api_key = os.environ.get(config.api_key_env)
+    if not api_key:
+        raise RetakeValidationError(
+            f"{config.api_key_env} is not set; cannot reach OpenRouter"
+        )
+
+    payload = json.dumps(
+        {
+            "model": config.openrouter_model,
+            "messages": [
+                {"role": "system", "content": _SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            "temperature": 0.0,
+            "response_format": {
+                "type": "json_schema",
+                "json_schema": {"name": "retakes", "strict": True, "schema": _SCHEMA},
+            },
+        }
+    ).encode()
+
+    request = urllib.request.Request(
+        config.openrouter_url,
+        data=payload,
+        headers={
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {api_key}",
+            # OpenRouter attributes calls to an app by these; harmless, and it
+            # keeps autocut's usage legible in the dashboard.
+            "X-Title": "autocut",
+        },
+    )
+    try:
+        with urllib.request.urlopen(request, timeout=config.timeout) as response:
+            body = json.loads(response.read())
+    except urllib.error.HTTPError as error:
+        detail = error.read().decode(errors="replace")[:200]
+        raise RetakeValidationError(f"OpenRouter returned {error.code}: {detail!r}") from error
+
+    try:
+        content = body["choices"][0]["message"]["content"]
+    except (KeyError, IndexError, TypeError) as error:
+        raise RetakeValidationError(f"unexpected OpenRouter response: {str(body)[:200]!r}") from error
+    try:
+        return json.loads(content)
+    except (json.JSONDecodeError, TypeError) as error:
+        raise RetakeValidationError(f"model did not return JSON: {str(content)[:200]!r}") from error
+
+
 def _is_superseded(words: list[Word], start: int, end: int, config: RetakeConfig) -> bool:
     """Whether the content of ``[start:end]`` is said again afterwards.
 
@@ -231,8 +293,19 @@ def _validate_chunk(
     return accepted
 
 
+def _ask(prompt: str, config: RetakeConfig, model: str | None) -> dict:
+    """One request to whichever backend is configured."""
+    if config.backend == "openrouter":
+        return _ask_openrouter(prompt, config)
+    if config.backend == "ollama":
+        return _ask_ollama(prompt, model, config)
+    raise RetakeValidationError(f"unknown retake backend {config.backend!r}")
+
+
 def _llm_spans(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
-    model = choose_model(config)
+    # Ollama needs a model resolved up front (and may raise if none is
+    # installed); OpenRouter carries its model in the request.
+    model = choose_model(config) if config.backend == "ollama" else None
     spans: list[RemovalSpan] = []
     step = _CHUNK_WORDS - _CHUNK_OVERLAP
 
@@ -241,7 +314,7 @@ def _llm_spans(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
         if len(chunk) < 8:
             break
         numbered = "\n".join(f"{i}: {word.text}" for i, word in enumerate(chunk))
-        result = _ask_ollama(numbered, model, config)
+        result = _ask(numbered, config, model)
         proposals = result.get("removals")
         if not isinstance(proposals, list):
             raise RetakeValidationError(f"'removals' was {type(proposals).__name__}, not a list")
@@ -286,12 +359,16 @@ def _ngram_repeats(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]
                 continue
             if words[later].start - words[earlier].start > config.ngram_window:
                 continue
-            # Only a restart, not a refrain: the two attempts must be adjacent,
-            # with nothing but the fluffed words between them.
-            if later - earlier > n * 3:
-                continue
             pause = words[later].start - words[later - 1].end
             if pause < config.required_pause:
+                continue
+            # Only a restart, not a refrain.  A word-count cap was tried here
+            # and cut real retakes: a fluffed sentence runs as long as it runs,
+            # and 15 words is ordinary.  What actually separates the two cases
+            # is whether the good take says the same thing again, which is
+            # exactly what ``_is_superseded`` measures -- so ask it, rather
+            # than guessing from how far apart the attempts are.
+            if not _is_superseded(words, earlier, later - 1, config):
                 continue
             spans.append(
                 RemovalSpan(
@@ -311,15 +388,19 @@ def detect(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
         return []
 
     # The deterministic detector always runs.  It is precise but narrow -- it
-    # only sees retakes where the words repeat exactly -- so the model's job is
-    # to add the ones it misses, not to replace it.  If the model is missing,
+    # only anchors on retakes that restart with the same run of words -- so the
+    # model's job is to add the ones it misses, not to replace it.  If the model
+    # is missing,
     # unreachable or talking nonsense, we still catch the obvious cases.
     spans = _ngram_repeats(words, config)
 
     try:
         spans += _llm_spans(words, config)
     except (RetakeValidationError, urllib.error.URLError, TimeoutError, OSError) as error:
-        log.warning("retake model unusable (%s); using the n-gram detector alone", error)
+        log.warning(
+            "retake backend %r unusable (%s); using the n-gram detector alone",
+            config.backend, error,
+        )
 
     log.info("retake detector proposed %d spans", len(spans))
     return spans
