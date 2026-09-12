@@ -62,6 +62,7 @@ vision = [
 
 [package.dev-dependencies]
 dev = [
+    { name = "httpx" },
     { name = "pytest" },
 ]
 
@@ -81,7 +82,10 @@ requires-dist = [
 provides-extras = ["asr", "vad", "vision", "server"]
 
 [package.metadata.requires-dev]
-dev = [{ name = "pytest", specifier = ">=8.2" }]
+dev = [
+    { name = "httpx", specifier = ">=0.27" },
+    { name = "pytest", specifier = ">=8.2" },
+]
 
 [[package]]
 name = "certifi"

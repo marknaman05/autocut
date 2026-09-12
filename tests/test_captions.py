@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import pytest
 
-from autocut.config import CaptionConfig
+from autocut.config import CAPTION_STYLES, CaptionConfig
 from autocut.models import KeepSegment, TimeMap, Word
 from autocut.render import captions
 
@@ -146,3 +146,120 @@ def test_a_font_is_always_found() -> None:
     assert captions.find_font("Arial Black").exists()
     # An unknown family falls back rather than failing the render.
     assert captions.find_font("No Such Font At All").exists()
+
+
+def line(*texts: str) -> captions.Line:
+    return captions.Line([captions.CaptionWord(text, 0.0, 0.0) for text in texts])
+
+
+def rgb(pixel: tuple[int, ...]) -> tuple[int, int, int]:
+    return pixel[:3]
+
+
+class TestRenderer:
+    """The drawing itself, checked by sampling pixels where a style must show.
+
+    Not golden images: those break on every font hinting change.  Each test
+    reads one pixel at a spot the layout arithmetic says a feature must be,
+    and one where it must not.
+    """
+
+    def test_uppercase_is_measured_as_it_is_drawn(self) -> None:
+        upper = captions.Renderer(CaptionConfig(uppercase=True), 1080)
+        lower = captions.Renderer(CaptionConfig(), 1080)
+        text = line("how")
+        assert upper._widths(text)[0] == upper.font.getlength("HOW")
+        assert upper._widths(text)[0] != lower._widths(text)[0]
+
+    def test_the_active_word_sits_on_a_pill(self) -> None:
+        config = CaptionConfig(
+            active_box_colour="#7C3AED", active_text_colour="#FFFFFF", highlight_colour="#FFFFFF"
+        )
+        renderer = captions.Renderer(config, 1080)
+        image = renderer.render(line("this", "is", "how"), active=1, popped=False)
+        x, widths = renderer.layout(line("this", "is", "how"))
+        centre = x + widths[0] + renderer.space + widths[1] / 2
+        baseline = renderer.height / 2
+        # Inside the pill's bottom padding: box, not glyph, not background.
+        inside = image.getpixel((round(centre), round(baseline + renderer.glyph_height / 2 + config.box_padding / 2)))
+        assert rgb(inside) == (0x7C, 0x3A, 0xED)
+        # The same spot under an inactive word is transparent.
+        elsewhere = image.getpixel((round(x + widths[0] / 2), round(baseline + renderer.glyph_height / 2 + config.box_padding / 2)))
+        assert elsewhere[3] == 0
+
+    def test_a_line_box_spans_the_line(self) -> None:
+        config = CaptionConfig(line_box_colour="#000000FF", outline=0, shadow_offset=0)
+        renderer = captions.Renderer(config, 1080)
+        words = line("this", "is", "how")
+        image = renderer.render(words, active=0, popped=False)
+        x, _ = renderer.layout(words)
+        baseline = renderer.height / 2
+        just_left_of_text = image.getpixel((round(x - config.box_padding / 2), round(baseline)))
+        assert just_left_of_text == (0, 0, 0, 255)
+        assert image.getpixel((0, 0))[3] == 0
+
+    def test_a_translucent_line_box_keeps_its_alpha(self) -> None:
+        renderer = captions.Renderer(CaptionConfig(line_box_colour="#000000B3", outline=0), 1080)
+        words = line("hi")
+        image = renderer.render(words, active=0, popped=False)
+        x, _ = renderer.layout(words)
+        pixel = image.getpixel((round(x - 5), round(renderer.height / 2)))
+        assert pixel[3] == 0xB3
+
+    def test_the_band_is_tall_enough_for_a_box(self) -> None:
+        config = CaptionConfig(active_box_colour="#000000", box_padding=40)
+        renderer = captions.Renderer(config, 1080)
+        assert renderer.height >= renderer.glyph_height + 2 * config.box_padding + 2 * config.outline
+
+    def test_glow_spreads_colour_past_the_outline(self) -> None:
+        config = CaptionConfig(outline_colour="#22D3EE", outline=2, glow=20, shadow_offset=0)
+        renderer = captions.Renderer(config, 1080)
+        words = line("HOW")
+        image = renderer.render(words, active=0, popped=False)
+        x, widths = renderer.layout(words)
+        # Well outside the outline, still inside the blur radius.
+        pixel = image.getpixel((round(x - config.outline - 8), round(renderer.height / 2)))
+        assert pixel[3] > 0
+        r, g, b = rgb(pixel)
+        assert b > r, "the halo should carry the outline colour"
+
+    def test_active_text_colour_defaults_to_the_highlight(self) -> None:
+        plain = captions.Renderer(CaptionConfig(highlight_colour="#FF0000", outline=0, shadow_offset=0), 1080)
+        words = line("I")
+        image = plain.render(words, active=0, popped=False)
+        # Somewhere in the middle of a capital I is solid glyph.
+        x, widths = plain.layout(words)
+        pixel = image.getpixel((round(x + widths[0] / 2), round(plain.height / 2)))
+        assert rgb(pixel) == (255, 0, 0)
+
+    @pytest.mark.parametrize("name", list(CAPTION_STYLES))
+    def test_every_style_renders(self, name, tmp_path) -> None:
+        result = captions.build(
+            words(("this", 0.0, 0.3), ("is", 0.3, 0.5), ("how", 0.5, 0.9)),
+            TimeMap.identity(1.0), CAPTION_STYLES[name], 1080, tmp_path,
+        )
+        assert result is not None
+        assert result[1] > 0
+
+
+class TestFindFont:
+    def test_bundled_fonts_win(self) -> None:
+        for stem in ("Anton-Regular", "BebasNeue-Regular", "Montserrat-ExtraBold"):
+            path = captions.find_font(stem)
+            assert path.parent == captions._BUNDLED_FONTS, stem
+
+    def test_a_spaced_name_finds_a_hyphenated_file(self) -> None:
+        assert captions.find_font("Anton Regular").name == "Anton-Regular.ttf"
+
+    def test_otf_is_accepted(self, tmp_path, monkeypatch) -> None:
+        source = captions._BUNDLED_FONTS / "Anton-Regular.ttf"
+        (tmp_path / "Foo.otf").write_bytes(source.read_bytes())
+        monkeypatch.setattr(captions, "_FONT_DIRECTORIES", (tmp_path,))
+        assert captions.find_font("Foo") == tmp_path / "Foo.otf"
+
+    def test_without_the_bundle_the_system_still_serves(self, monkeypatch) -> None:
+        monkeypatch.setattr(
+            captions, "_FONT_DIRECTORIES",
+            tuple(d for d in captions._FONT_DIRECTORIES if d != captions._BUNDLED_FONTS),
+        )
+        assert captions.find_font("Anton-Regular").exists()

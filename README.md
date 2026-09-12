@@ -14,7 +14,8 @@ posted to Instagram (see below); nothing else leaves the machine.
 
 - macOS on Apple Silicon (Metal-accelerated transcription)
 - `ffmpeg` and `ffprobe` on `PATH` — any build; captions are drawn in Python, so
-  libass is not needed
+  libass is not needed. The caption fonts (Anton, Bebas Neue, Montserrat; all
+  SIL OFL) ship in the package, so nothing needs installing for them
 - [`uv`](https://docs.astral.sh/uv/)
 - Optional, for smarter retake detection — pick one:
   - [Ollama](https://ollama.com) with a model pulled (`ollama pull qwen3:8b`), or
@@ -47,12 +48,18 @@ click from coming back. "Play the edit" runs the whole thing end to end before
 you spend a render on it. The detectors are good enough to propose and not good
 enough to decide.
 
+Next to Render is the caption style: classic, bold caps, pill, minimal, boxed
+or neon. Each card is drawn by the same code that captions the video, so what
+you pick is what you get. The styles are plain data in `CAPTION_STYLES`
+(`autocut/config.py`) -- copy one and change a colour to add your own.
+
 CLI — renders straight through, applying every proposed cut:
 
 ```sh
 uv run autocut render input.mp4 -o finished.mp4
 uv run autocut render input.mp4 --preset gentle      # pauses only
 uv run autocut render input.mp4 --preset aggressive  # tight social cut
+uv run autocut render input.mp4 --caption-style hormozi
 ```
 
 Individual stages, for debugging:
@@ -168,7 +175,7 @@ input.mp4
   ·  · · · the web app splits this into parts and waits for you · · ·
   ├─ cut         a single ffmpeg select/aselect pass
   ├─ track       face detection on the cut video -> smoothed crop keyframes
-  ├─ caption     Pillow renders one image per word state
+  ├─ caption     Pillow renders one image per word state, in the chosen style
   ├─ compose     reframe + captions + loudness + H.264, in one pass
   └─ publish     (optional) upload to Instagram as a Reel
 ```
