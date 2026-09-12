@@ -243,6 +243,17 @@ And a gap in the *transcript* is not a gap in the *audio* — Whisper drops word
 — so only the genuinely silent stretches inside a gap are cut, never the gap as
 a whole.
 
+The commonest dropped words are a whole repeated sentence. Whisper decodes
+thirty seconds at a time and will not say the same thing twice within one
+window, so a restarted line comes back once, with the last word's timestamp
+stretched over the repeat. Once the timings are repaired that leaves a hole:
+seconds of speech with no words. Any such hole is cut out and transcribed on
+its own, where the recogniser — with nothing before it to repeat — reads the
+second copy fine; the words go back in at their real times, the retake
+detector sees the repeat, and whichever copy you keep has captions. A hole
+whose second reading is a lone doubtful word is left as it was and shown as
+"check this" rather than captioned with a guess.
+
 None of these apply to cuts a person approved in the web app: a deliberate
 choice is taken literally.
 

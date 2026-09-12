@@ -17,7 +17,7 @@ from pathlib import Path
 
 from .analyze import fillers, merge, punchins, retakes, silence
 from .asr import get_transcriber, load_words, refine_timings, save_words, trim_overlong
-from .asr import vad
+from .asr import holes, vad
 from .audio import Envelope
 from .config import DEFAULT, Preset
 from .ffmpeg import FFmpegError
@@ -151,6 +151,18 @@ def _prepare(
         words = transcriber.transcribe(timeline.audio, language=preset.language)
         if envelope is not None:
             words = refine_timings(words, envelope)
+        words = _repair_timings(words, timeline.audio, preset, envelope)
+        # Only once the timings are honest can a hole be seen: before the
+        # repair, a swallowed retake hides inside the stretched last word of
+        # the sentence before it.
+        if preset.retranscribe_holes > 0 and envelope is not None:
+            report("transcribe", "re-reading stretches with no words")
+            words = holes.fill_holes(
+                words, timeline.audio, timeline.duration, envelope, transcriber, work_dir,
+                language=preset.language,
+                min_gap=preset.retranscribe_holes,
+                sustained=preset.silence.sustained_speech,
+            )
         timeline.words = words
         save_words(words, transcript_path)
 
