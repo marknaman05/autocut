@@ -237,7 +237,7 @@
   .style.selected span { color: var(--ink); }
 
   /* ---- done ---- */
-  .output:empty { display: none; }
+  .output:empty, .output[hidden] { display: none; }
   .output { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 40px; align-items: start; border-top: 1px solid var(--border-subtle); padding-top: 20px; }
   .output .frame { background: var(--paper); border: 1px solid var(--border-subtle); border-radius: var(--r-lg); padding: 12px; }
   .output video { width: 100%; aspect-ratio: 9 / 16; border-radius: var(--r-md); background: var(--ink); display: block; }
@@ -425,6 +425,14 @@ function render(card, job) {
     const review = card.querySelector(".review");
     review.querySelectorAll("button").forEach(b => { b.disabled = true; });
   }
+  // A job going back through the render is a re-render from the edit screen:
+  // the previous finished video is gone, and so is anything said about it.
+  if ((job.status === "queued" || job.status === "rendering") && card.querySelector(".output video")) {
+    card.querySelector(".output").innerHTML = "";
+    card.querySelector(".output").hidden = false;
+    delete card.dataset.publish;
+    delete card.dataset.polling;
+  }
 
   if (done && job.summary && !card.querySelector(".output video")) {
     const s = job.summary;
@@ -448,10 +456,26 @@ function render(card, job) {
         </div>
         <div class="actions">
           <a class="btn-primary lg download" href="/jobs/${card.dataset.id}/result" download>Download MP4</a>
+          <button class="btn-secondary lg back">Back to the edit</button>
         </div>
         <div class="publish"></div>
       </div>`;
     showPublish(card);
+    // Nothing is final: the parts, the corrected words and the chosen style
+    // are all still on the review screen, so going back costs nothing and a
+    // second render simply replaces the first.
+    card.querySelector(".back").addEventListener("click", () => {
+      card.querySelector(".output").hidden = true;
+      const review = card.querySelector(".review");
+      review.hidden = false;
+      review.querySelectorAll("button").forEach(b => { b.disabled = false; });
+      const render = review.querySelector("button.primary");
+      render.textContent = "Render again";
+      card.classList.remove("finished");
+      card.classList.add("reviewing");
+      card.querySelector(".pct").textContent = "your turn";
+      review.scrollIntoView({ behavior: "smooth", block: "start" });
+    });
   }
   if (done && job.publish) renderPublish(card, job.publish);
 }
@@ -736,7 +760,11 @@ async function showReview(card, job) {
       button.textContent = "Render video";
       card.querySelector(".msg").textContent = `could not start render: ${await response.text()}`;
       card.querySelector(".msg").classList.add("error");
+      return;
     }
+    // The event stream closes when a job finishes; a re-render needs a new
+    // one to follow.
+    if (!card.dataset.listening) listen(card, id);
   });
 
   updateTotals(panel, data.duration);
@@ -878,12 +906,14 @@ const escape = text =>
 
 function listen(card, id) {
   const source = new EventSource(`/jobs/${id}/events`);
+  card.dataset.listening = "1";
+  const close = () => { source.close(); delete card.dataset.listening; };
   source.onmessage = event => {
     const job = JSON.parse(event.data);
     render(card, job);
-    if (job.status === "done" || job.status === "error") source.close();
+    if (job.status === "done" || job.status === "error") close();
   };
-  source.onerror = () => source.close();
+  source.onerror = close;
 }
 
 // Pick up anything already running, so a reload does not lose a job.

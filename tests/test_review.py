@@ -601,3 +601,23 @@ class TestCaptionStyleChoice:
             asyncio.run(JobManager(job.work_dir).approve(job, [1], "nope"))
         assert job.keep == [0]
         assert job.caption_style == "classic"
+
+
+class TestRenderAgain:
+    """Going back from a finished video to the edit and rendering once more."""
+
+    def test_a_finished_job_can_be_approved_again(self, job) -> None:
+        from autocut.pipeline import Result
+        from server.jobs import Publication
+
+        job.status = "done"
+        job.result = Result(output=job.work_dir / "final.mp4", timeline=job.timeline)
+        job.publish = Publication(status="published", permalink="https://instagram.com/reel/x/")
+        asyncio.run(JobManager(job.work_dir).approve(job, [0, 1], "neon"))
+        assert job.status == "queued"
+        assert job.keep == [0, 1]
+        assert job.caption_style == "neon"
+        assert job.result is None
+        assert job.publish is None
+        assert "publish" not in job.snapshot()
+        assert "summary" not in job.snapshot()

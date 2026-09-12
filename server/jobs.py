@@ -325,6 +325,10 @@ class JobManager:
 
         job.keep = sorted(set(keep))
         job.caption_style = style
+        # A render replaces the file on disk, so a previous result -- and
+        # anything published from it -- no longer describes this job.
+        job.result = None
+        job.publish = None
         job.status = "queued"
         job.stage = "queued"
         job.percent = 0
