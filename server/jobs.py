@@ -120,6 +120,10 @@ class Job:
                 "words": len(timeline.words),
                 "tracked": self.result.tracked,
                 "elapsed": round(self.result.elapsed),
+                #: The file's own name, which changes with every render; the
+                #: browser puts it in the result URL so a new cut is never
+                #: served from cache.
+                "output": self.result.output.name,
             }
         if self.publish is not None:
             data["publish"] = self.publish.snapshot()
@@ -325,8 +329,15 @@ class JobManager:
 
         job.keep = sorted(set(keep))
         job.caption_style = style
-        # A render replaces the file on disk, so a previous result -- and
-        # anything published from it -- no longer describes this job.
+        # A render replaces the previous one: the old file goes, so the work
+        # directory never holds two finished videos to confuse, and so does
+        # anything published from it.  The new one gets its own name (see
+        # ``_render``), so no browser can mistake a cached copy for it.
+        if job.result is not None:
+            try:
+                job.result.output.unlink(missing_ok=True)
+            except OSError as error:
+                log.warning("job %s: could not remove %s: %s", job.id, job.result.output, error)
         job.result = None
         job.publish = None
         job.status = "queued"
@@ -509,12 +520,17 @@ class JobManager:
         job.status = "rendering"
         self._publish(job)
 
+        # Named by the moment it was made, so every render of a job is a
+        # different URL -- a browser that cached ``final.mp4`` would otherwise
+        # keep showing the previous cut after "Back to the edit".
+        stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
         result = await asyncio.to_thread(
             render_edit,
             job.work_dir,
             job.keep or [],
             job.preset_config,
             self._reporter(job),
+            output_name=f"final-{stamp}.mp4",
         )
         job.result = result
         job.status = "done"

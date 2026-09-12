@@ -438,8 +438,11 @@ function render(card, job) {
     const s = job.summary;
     card.querySelector(".review").hidden = true;
     const stem = escape(job.filename.replace(/\.[^.]+$/, ""));
+    // The render's own filename goes in the URL: a re-render is a different
+    // file, and this is what stops the browser replaying the previous one.
+    const result = `/jobs/${card.dataset.id}/result?v=${encodeURIComponent(s.output || "")}`;
     card.querySelector(".output").innerHTML = `
-      <div class="frame"><video controls preload="metadata" src="/jobs/${card.dataset.id}/result"></video></div>
+      <div class="frame"><video controls preload="metadata" src="${result}"></video></div>
       <div class="result">
         <div>
           <div class="state">&#9679; Finished</div>
@@ -455,7 +458,7 @@ function render(card, job) {
           <div><b>${escape(job.caption_style || "classic")}</b><span>captions</span></div>
         </div>
         <div class="actions">
-          <a class="btn-primary lg download" href="/jobs/${card.dataset.id}/result" download>Download MP4</a>
+          <a class="btn-primary lg download" href="${result}" download>Download MP4</a>
           <button class="btn-secondary lg back">Back to the edit</button>
         </div>
         <div class="publish"></div>

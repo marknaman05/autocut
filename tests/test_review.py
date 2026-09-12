@@ -621,3 +621,33 @@ class TestRenderAgain:
         assert job.publish is None
         assert "publish" not in job.snapshot()
         assert "summary" not in job.snapshot()
+
+    def test_a_rerender_removes_the_previous_file(self, job) -> None:
+        from autocut.pipeline import Result
+
+        old = job.work_dir / "final-20260101-000000.mp4"
+        old.write_bytes(b"old cut")
+        job.status = "done"
+        job.result = Result(output=old, timeline=job.timeline)
+        asyncio.run(JobManager(job.work_dir).approve(job, [0]))
+        assert not old.exists()
+
+    def test_the_result_is_named_by_its_moment(self, job, monkeypatch) -> None:
+        """Every render of a job is a different file, so no URL is ever reused."""
+        from autocut.pipeline import Result
+        from server import jobs as jobs_module
+
+        seen = []
+
+        def fake_render(work_dir, keep, preset, on_progress, output_name):
+            seen.append(output_name)
+            path = work_dir / output_name
+            path.write_bytes(b"cut")
+            return Result(output=path, timeline=job.timeline)
+
+        monkeypatch.setattr(jobs_module, "render_edit", fake_render)
+        manager = JobManager(job.work_dir)
+        job.keep = [0]
+        asyncio.run(manager._render(job))
+        assert seen and seen[0].startswith("final-") and seen[0].endswith(".mp4")
+        assert job.snapshot()["summary"]["output"] == seen[0]
