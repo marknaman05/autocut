@@ -4,210 +4,315 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>autocut</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap">
 <style>
+  /* The stage is paper and ink; colour is only ever state.  Flat at rest --
+     the one shadow is the lift under a primary action.  Focus is a border
+     turning ink, never a ring. */
   :root {
-    --bg: #0f1216;
-    --panel: #171b21;
-    --line: #262c35;
-    --text: #e6e9ee;
-    --muted: #8b95a3;
-    --accent: #ffd44a;
-    --ok: #4ade80;
-    --bad: #f87171;
+    --paper: #ffffff;
+    --paper-tint: #fafafa;
+    --border-subtle: #f5f5f5;
+    --border: #e5e5e5;
+    --faint: #a3a3a3;
+    --muted: #737373;
+    --body: #404040;
+    --ink-soft: #262626;
+    --ink: #171717;
+    --in: #10b981;        /* emerald: a part that stays */
+    --in-soft: #d1fae5;
+    --out: #f43f5e;       /* rose: retakes, errors */
+    --out-soft: #ffe4e6;
+    --filler: #0d9488;    /* teal */
+    --filler-soft: #ccfbf1;
+    --check: #92400e;     /* amber: a word the recogniser doubted */
+    --check-soft: #fef3c7;
+    --playing: #a5f3fc;   /* cyan: the part being heard right now */
+    --sans: "Geist", ui-sans-serif, system-ui, sans-serif;
+    --serif: "Instrument Serif", ui-serif, Georgia, serif;
+    --mono: "Geist Mono", ui-monospace, Menlo, monospace;
+    --r-sm: 6px; --r-md: 8px; --r-lg: 16px;
+    --lift: 0 20px 25px -5px rgba(212, 212, 212, .5);
   }
   * { box-sizing: border-box; }
   body {
-    margin: 0; padding: 48px 24px; background: var(--bg); color: var(--text);
-    font: 15px/1.5 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    display: flex; justify-content: center;
+    margin: 0; padding: 0 48px 64px; background: var(--paper-tint); color: var(--ink);
+    font: 15px/1.6 var(--sans); letter-spacing: -0.01em;
   }
-  main { width: 100%; max-width: 720px; }
-  h1 { font-size: 22px; margin: 0 0 4px; letter-spacing: -0.01em; }
-  .sub { color: var(--muted); margin: 0 0 28px; font-size: 14px; }
+  main { max-width: 1200px; margin: 0 auto; }
+  h1, h2, h3 { font-weight: 400; margin: 0; }
+  a { color: var(--ink); }
+  button { font: inherit; letter-spacing: inherit; cursor: pointer; }
+  button:disabled { cursor: default; opacity: .45; }
+  code { font-family: var(--mono); font-size: .92em; color: var(--ink); }
+  .mono { font-family: var(--mono); letter-spacing: 0; }
 
+  /* ---- header ---- */
+  header {
+    display: flex; justify-content: space-between; align-items: baseline;
+    padding: 24px 0 0;
+  }
+  .wordmark { font-family: var(--serif); font-size: 26px; color: var(--ink); }
+  .wordmark small {
+    font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    color: var(--faint); margin-left: 10px;
+  }
+  header .meta { font-size: 14px; color: var(--muted); }
+
+  /* ---- buttons ---- */
+  .btn, .btn-primary, .btn-secondary, .btn-quiet {
+    display: inline-flex; align-items: center; gap: 8px; border-radius: var(--r-sm);
+    padding: 8px 16px; font-size: 14px; font-weight: 500; line-height: 1.4;
+    transition: background-color .15s, border-color .15s, color .15s;
+  }
+  .btn-primary { background: var(--ink-soft); color: var(--paper); border: 1px solid var(--ink-soft); }
+  .btn-primary:hover:not(:disabled) { background: var(--ink); border-color: var(--ink); }
+  .btn-primary.lg { padding: 12px 24px; font-size: 16px; box-shadow: var(--lift); }
+  .btn-secondary { background: var(--paper); color: var(--ink-soft); border: 1px solid var(--ink-soft); }
+  .btn-secondary:hover:not(:disabled) { background: var(--paper-tint); }
+  .btn-secondary.lg { padding: 12px 24px; font-size: 16px; }
+  .btn-quiet { background: none; border: 1px solid transparent; color: var(--muted); }
+  .btn-quiet:hover:not(:disabled) { color: var(--ink); }
+  .btn svg, .btn-primary svg, .btn-secondary svg, .btn-quiet svg { flex: none; }
+
+  /* ---- home: the editorial opening ---- */
+  #home {
+    display: grid; grid-template-columns: 1.15fr 1fr; gap: 72px; align-items: center;
+    margin-top: 72px;
+  }
+  #home h1 { font-family: var(--serif); font-size: 72px; line-height: 1.02; letter-spacing: -0.01em; }
+  #home h1 em { font-style: italic; color: var(--body); }
+  #home .lede { font-size: 17px; line-height: 1.6; color: var(--body); margin: 24px 0 0; max-width: 540px; letter-spacing: -0.025em; }
+  ol.rail {
+    list-style: none; margin: 36px 0 0; padding: 24px 0 0; border-top: 1px solid var(--border);
+    display: flex; flex-direction: column; gap: 12px; max-width: 540px;
+  }
+  ol.rail li { display: grid; grid-template-columns: 32px 1fr; gap: 14px; font-size: 15px; color: var(--ink); letter-spacing: -0.025em; }
+  ol.rail li::before {
+    counter-increment: step; content: "0" counter(step);
+    font-family: var(--mono); font-size: 12px; color: var(--faint); padding-top: 3px; letter-spacing: 0;
+  }
+  ol.rail { counter-reset: step; }
+  .intake { display: flex; flex-direction: column; gap: 14px; }
   #drop {
-    border: 2px dashed var(--line); border-radius: 14px; padding: 44px 24px;
-    text-align: center; cursor: pointer; transition: border-color .15s, background .15s;
-    background: var(--panel);
+    height: 380px; border-radius: var(--r-lg); border: 1px dashed var(--faint); background: var(--paper);
+    display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 12px;
+    cursor: pointer; transition: border-color .15s, background-color .15s; text-align: center;
   }
-  #drop:hover, #drop.over { border-color: var(--accent); background: #1c2129; }
-  #drop strong { display: block; margin-bottom: 6px; }
-  #drop span { color: var(--muted); font-size: 13px; }
-
-  .options { display: flex; gap: 8px; align-items: center; margin-top: 16px; font-size: 13px; }
-  .options label { color: var(--muted); }
-  select {
-    background: var(--panel); color: var(--text); border: 1px solid var(--line);
-    border-radius: 8px; padding: 6px 10px; font: inherit; font-size: 13px;
+  #drop:hover, #drop.over { border-color: var(--ink); border-style: solid; }
+  #drop .glyph {
+    width: 56px; height: 56px; border-radius: var(--r-md); background: var(--paper-tint);
+    border: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: center;
   }
+  #drop strong { font-size: 18px; font-weight: 600; }
+  #drop span { font-size: 14px; color: var(--muted); }
+  #drop span code { color: var(--faint); font-size: 11px; letter-spacing: .04em; }
+  .presets { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; font-size: 14px; color: var(--muted); }
+  .presets label {
+    display: inline-flex; padding: 8px 14px; border-radius: var(--r-sm); border: 1px solid var(--border);
+    background: var(--paper); color: var(--body); font-weight: 500; cursor: pointer; position: relative;
+    transition: border-color .15s, background-color .15s, color .15s;
+  }
+  .presets label:hover { border-color: var(--ink); }
+  .presets input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .presets label.selected { background: var(--ink-soft); border-color: var(--ink); color: var(--paper); }
+  /* Once something is on the bench the opening shrinks to a strip: the work
+     is below it now. */
+  body.working #home { grid-template-columns: 1fr 1fr; gap: 48px; margin-top: 40px; align-items: start; }
+  body.working #home h1 { font-size: 40px; }
+  body.working #home .lede, body.working ol.rail { display: none; }
+  body.working #drop { height: 150px; }
 
+  /* ---- job card ---- */
+  #jobs { display: flex; flex-direction: column; gap: 16px; margin-top: 48px; }
   .card {
-    margin-top: 20px; background: var(--panel); border: 1px solid var(--line);
-    border-radius: 14px; padding: 20px;
+    background: var(--paper); border: 1px solid var(--border-subtle); border-radius: var(--r-lg);
+    padding: 24px; display: flex; flex-direction: column; gap: 16px;
   }
   .row { display: flex; justify-content: space-between; align-items: baseline; gap: 12px; }
-  .name { font-weight: 600; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .pct { color: var(--accent); font-variant-numeric: tabular-nums; font-size: 13px; }
-  .bar { height: 6px; background: #0c0f13; border-radius: 999px; overflow: hidden; margin: 14px 0 10px; }
-  .bar > i { display: block; height: 100%; width: 0; background: var(--accent); transition: width .3s ease; }
-  .msg { color: var(--muted); font-size: 13px; }
-  .msg.error { color: var(--bad); }
-
-  ol.stages { list-style: none; margin: 16px 0 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px; }
-  ol.stages li {
-    font-size: 11px; padding: 4px 9px; border-radius: 999px;
-    border: 1px solid var(--line); color: var(--muted);
-  }
-  ol.stages li.active { border-color: var(--accent); color: var(--accent); }
-  ol.stages li.done { border-color: #2c4a35; color: var(--ok); }
-
-  video { width: 100%; max-width: 300px; border-radius: 12px; margin-top: 18px; display: block; background: #000; }
-  .summary { margin-top: 14px; font-size: 13px; color: var(--muted); }
-  .summary b { color: var(--text); font-weight: 600; }
-  a.download, button.primary {
-    display: inline-block; margin-top: 14px; background: var(--accent); color: #171b21;
-    text-decoration: none; padding: 9px 16px; border-radius: 9px; font-weight: 600;
-    font-size: 14px; border: 0; cursor: pointer; font-family: inherit;
-  }
-  button.primary:disabled { opacity: .5; cursor: default; }
+  .name { font-weight: 600; font-size: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .pct { font-family: var(--mono); font-size: 12px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); white-space: nowrap; }
+  .bar { height: 6px; background: var(--border-subtle); border-radius: 999px; overflow: hidden; }
+  .bar > i { display: block; height: 100%; width: 0; background: var(--ink); border-radius: 999px; transition: width .3s ease; }
+  .msg { font-size: 14px; color: var(--muted); }
+  .msg.error { color: var(--out); }
+  ol.stages { list-style: none; margin: 0; padding: 0; display: flex; flex-wrap: wrap; gap: 6px 14px; }
+  ol.stages li { display: flex; align-items: center; gap: 8px; font-size: 13px; font-weight: 500; color: var(--faint); }
+  ol.stages li::before { content: ""; width: 8px; height: 8px; border-radius: 50%; background: var(--border); }
+  ol.stages li.active { color: var(--ink); }
+  ol.stages li.active::before { background: var(--ink); }
+  ol.stages li.done { color: var(--ink); }
+  ol.stages li.done::before { background: var(--in); }
+  .card.finished .bar, .card.finished .stages, .card.finished .pct, .card.reviewing .bar, .card.reviewing .stages { display: none; }
+  .card.finished > .msg:not(.error) { display: none; }
 
   /* ---- review ---- */
-  .review { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
-  .review video { max-width: 100%; margin: 0 0 16px; }
-  .review-head {
-    display: flex; justify-content: space-between; align-items: baseline;
-    gap: 12px; margin-bottom: 10px; flex-wrap: wrap;
-  }
-  .review-head h2 { font-size: 14px; margin: 0; font-weight: 600; }
-  .bulk { display: flex; gap: 6px; }
-  .bulk button {
-    background: none; border: 1px solid var(--line); color: var(--muted);
-    border-radius: 7px; padding: 3px 9px; font: inherit; font-size: 12px; cursor: pointer;
-  }
-  .bulk button:hover { border-color: var(--accent); color: var(--accent); }
+  .review { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 32px; align-items: start; border-top: 1px solid var(--border-subtle); padding-top: 20px; }
+  .review[hidden] { display: none; }
+  .review-head { display: flex; justify-content: space-between; align-items: flex-end; gap: 16px; flex-wrap: wrap; margin-bottom: 16px; }
+  .review-head h2 { font-family: var(--serif); font-size: 32px; line-height: 1.15; }
+  .review-head .hint { display: block; font-family: var(--sans); font-size: 14px; color: var(--muted); margin-top: 4px; letter-spacing: -0.025em; }
+  .review-head .hint .flag { background: var(--check-soft); color: var(--check); border-radius: var(--r-sm); padding: 1px 6px; font-weight: 500; }
+  .bulk { display: flex; gap: 8px; flex-wrap: wrap; }
+  .bulk button { background: var(--paper); border: 1px solid var(--border); color: var(--body); border-radius: var(--r-sm); padding: 7px 12px; font-size: 13px; font-weight: 500; display: inline-flex; align-items: center; gap: 6px; }
+  .bulk button:hover:not(:disabled) { border-color: var(--ink); color: var(--ink); }
+  .dock { position: sticky; top: 16px; display: flex; flex-direction: column; gap: 10px; }
+  .dock video { width: 100%; aspect-ratio: 9 / 16; border-radius: var(--r-md); background: var(--ink); display: block; object-fit: contain; }
+  .dock .now { display: flex; justify-content: space-between; font-family: var(--mono); font-size: 12px; letter-spacing: .02em; text-transform: uppercase; color: var(--muted); }
+  .dock .now b { font-weight: 500; color: var(--ink); }
 
-  ul.parts { list-style: none; margin: 0; padding: 0; counter-reset: part; }
+  ul.parts { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 8px; counter-reset: part; }
   ul.parts li {
-    display: grid; grid-template-columns: auto 1fr auto; gap: 10px;
-    align-items: start; padding: 10px 0; border-top: 1px solid var(--line);
+    display: grid; grid-template-columns: auto minmax(0, 1fr) auto; gap: 16px; align-items: start;
+    padding: 14px 16px; border: 1px solid var(--border-subtle); border-radius: var(--r-lg); background: var(--paper);
+    transition: border-color .15s, background-color .15s;
   }
-  /* A dropped part is still listed -- it can be put back -- but it is not
-     part of the video, so it should not read like the rest. */
-  ul.parts li.dropped { opacity: .45; }
-  ul.parts li.dropped .cut-text q { text-decoration: line-through; }
-  .order {
-    counter-increment: part; font-variant-numeric: tabular-nums;
-    color: var(--muted); font-size: 11px; min-width: 1.6em;
-  }
-  ul.parts li.dropped .order { visibility: hidden; }
-  .order::before { content: counter(part); }
+  ul.parts li:hover { border-color: var(--border); }
+  ul.parts li.playing { border-color: var(--ink); background: var(--paper-tint); }
+  ul.parts li.dropped { opacity: .6; }
+  ul.parts li.dropped .cut-text .w { text-decoration: line-through; color: var(--muted); }
+  ul.parts li.dropped .order { display: none; }
   .cut-toggle {
-    appearance: none; width: 34px; height: 20px; border-radius: 999px;
-    background: #2b323c; border: 0; cursor: pointer; position: relative;
-    transition: background .15s; margin-top: 2px; flex: none;
+    appearance: none; width: 46px; height: 26px; border-radius: 999px; background: var(--border);
+    border: 0; position: relative; flex: none; margin-top: 1px; transition: background .15s; padding: 0;
   }
   .cut-toggle::after {
-    content: ""; position: absolute; top: 3px; left: 3px; width: 14px; height: 14px;
-    border-radius: 50%; background: var(--muted); transition: transform .15s, background .15s;
+    content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px; border-radius: 50%;
+    background: var(--paper); border: 1px solid rgba(0, 0, 0, .08); box-sizing: border-box; transition: transform .15s;
   }
-  .cut-toggle[aria-pressed="true"] { background: #24402c; }
-  .cut-toggle[aria-pressed="true"]::after { transform: translateX(14px); background: var(--ok); }
-
+  .cut-toggle[aria-pressed="true"] { background: var(--in); }
+  .cut-toggle[aria-pressed="true"]::after { transform: translateX(20px); }
   .cut-body { min-width: 0; }
-  .cut-meta {
-    font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums;
-    display: flex; gap: 8px; align-items: center; flex-wrap: wrap;
-  }
+  .cut-meta { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; font-size: 13px; color: var(--muted); margin-bottom: 4px; }
+  .order { counter-increment: part; font-weight: 600; color: var(--ink); }
+  .order::before { content: "Part " counter(part); }
+  ul.parts li.dropped .order + .when::before { content: "Dropped"; font-family: var(--sans); font-weight: 600; color: var(--faint); margin-right: 10px; }
+  .when, .len { font-family: var(--mono); font-size: 12px; letter-spacing: 0; }
+  ul.parts li.playing .when { background: var(--playing); color: var(--ink); border-radius: 4px; padding: 0 4px; }
   .tag {
-    font-size: 10px; text-transform: uppercase; letter-spacing: .04em;
-    border: 1px solid var(--line); border-radius: 999px; padding: 1px 7px;
+    font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase;
+    border-radius: var(--r-sm); padding: 3px 8px; background: var(--border-subtle); color: var(--muted);
   }
-  .tag.retake, .tag.ngram_repeat { border-color: #6b4a1f; color: var(--accent); }
-  .tag.filler { border-color: #3a4a6b; color: #93b4f8; }
-  .tag.silence, .tag.offcut { border-color: var(--line); color: var(--muted); }
-  .tag.untranscribed { border-color: #6b2a2a; color: var(--bad); }
-  .cut-text { margin-top: 3px; font-size: 13px; }
-  .cut-text q { color: var(--text); }
-  /* A caption word is editable in place: the recogniser mishears names and
-     jargon constantly, and the fix is one word long. */
-  .w {
-    border-radius: 3px; padding: 0 2px; margin: 0 -1px;
-    border-bottom: 1px dashed transparent; cursor: text; white-space: pre;
-  }
-  .w:hover { border-bottom-color: var(--line); }
-  /* The recogniser said so itself: these are the words to read twice. */
-  .w.uncertain { border-bottom: 1px dashed var(--accent); color: var(--accent); }
-  .w.uncertain:focus { color: var(--text); }
-  .w:focus { outline: none; background: #2b323c; border-bottom-color: var(--accent); }
-  .w.saving { opacity: .5; }
-  .w.saved { background: #24402c; transition: background 1.2s ease; }
-  .w.failed { background: #4a2020; }
-  .hint { color: var(--muted); font-size: 12px; font-weight: 400; }
-  .hint .flag { color: var(--accent); font-weight: 400; border-bottom: 1px dashed var(--accent); }
-  .cut-text .ctx { color: var(--muted); }
+  .tag.retake, .tag.ngram_repeat { background: var(--out-soft); color: var(--out); }
+  .tag.filler { background: var(--filler-soft); color: var(--filler); }
+  .tag.untranscribed { background: var(--check-soft); color: var(--check); }
+  .cut-text { font-size: 16px; line-height: 1.6; color: var(--ink); letter-spacing: -0.025em; }
   .cut-text .none { color: var(--muted); font-style: italic; }
+  /* A word is editable in place: the recogniser mishears names and jargon
+     constantly, and the fix is one word long. */
+  .w { border-radius: var(--r-sm); padding: 1px 2px; margin: 0 -1px; cursor: text; white-space: pre; border-bottom: 2px solid transparent; }
+  .w:hover { border-bottom-color: var(--border); }
+  .w.uncertain { background: var(--check-soft); color: var(--check); padding: 1px 6px; }
+  .w:focus { outline: none; border-bottom-color: var(--ink); background: var(--paper-tint); color: var(--ink); }
+  .w.saving { opacity: .5; }
+  .w.saved { background: var(--in-soft); color: var(--ink); transition: background 1.2s ease; }
+  .w.failed { background: var(--out-soft); color: var(--out); }
   .play {
-    background: none; border: 1px solid var(--line); color: var(--muted);
-    border-radius: 7px; padding: 3px 9px; font: inherit; font-size: 12px;
-    cursor: pointer; flex: none;
+    width: 36px; height: 36px; border-radius: var(--r-sm); border: 1px solid var(--border); background: var(--paper);
+    display: inline-flex; align-items: center; justify-content: center; flex: none; color: var(--ink); padding: 0;
   }
-  .play:hover { border-color: var(--accent); color: var(--accent); }
-  .totals { margin-top: 14px; font-size: 13px; color: var(--muted); }
-  .totals b { color: var(--text); }
+  .play:hover:not(:disabled) { border-color: var(--ink); }
+  ul.parts li.playing .play { background: var(--ink); border-color: var(--ink); color: var(--paper); }
 
-  /* ---- caption style ---- */
-  .styles-head { margin-top: 18px; font-size: 14px; font-weight: 600; }
-  .styles {
-    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
-    gap: 8px; margin-top: 8px;
+  /* The finish bar sits at the bottom of the viewport while the list scrolls
+     past it, so the total and Render are never off-screen. */
+  .finish {
+    position: sticky; bottom: 16px; margin-top: 16px; background: var(--paper); border: 1px solid var(--border);
+    border-radius: var(--r-lg); padding: 14px 20px; display: flex; align-items: center; justify-content: space-between;
+    gap: 20px; flex-wrap: wrap; grid-column: 1 / -1;
   }
-  .style {
-    position: relative; display: block; border: 1px solid var(--line); border-radius: 9px;
-    padding: 6px; background: var(--bg); cursor: pointer; transition: border-color .15s;
-  }
-  .style:hover { border-color: var(--muted); }
-  .style.selected { border-color: var(--accent); }
+  .finish .right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-left: auto; }
+  .totals { font-size: 14px; color: var(--muted); }
+  .totals b { font-family: var(--mono); font-weight: 500; font-size: 18px; color: var(--ink); letter-spacing: 0; }
+  .styles-head { font-family: var(--mono); font-size: 10px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-right: 4px; }
+  .styles { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+  .style { position: relative; display: flex; flex-direction: column; align-items: center; gap: 5px; cursor: pointer; }
   .style input { position: absolute; opacity: 0; width: 0; height: 0; }
-  .style img { display: block; width: 100%; border-radius: 6px; background: #1c2129; }
-  .style span { display: block; margin-top: 5px; font-size: 12px; color: var(--muted); text-align: center; }
-  .style.selected span { color: var(--accent); }
+  .style img { display: block; width: 84px; border-radius: var(--r-sm); background: #1c2129; border: 1px solid var(--border); outline: 1px solid transparent; outline-offset: 1px; transition: border-color .15s, outline-color .15s; }
+  .style:hover img { border-color: var(--ink); }
+  .style.selected img { border-color: var(--ink); outline-color: var(--ink); }
+  .style span { font-size: 11px; color: var(--muted); font-weight: 500; }
+  .style.selected span { color: var(--ink); }
+
+  /* ---- done ---- */
+  .output:empty { display: none; }
+  .output { display: grid; grid-template-columns: 340px minmax(0, 1fr); gap: 40px; align-items: start; border-top: 1px solid var(--border-subtle); padding-top: 20px; }
+  .output .frame { background: var(--paper); border: 1px solid var(--border-subtle); border-radius: var(--r-lg); padding: 12px; }
+  .output video { width: 100%; aspect-ratio: 9 / 16; border-radius: var(--r-md); background: var(--ink); display: block; }
+  .result { display: flex; flex-direction: column; gap: 24px; padding-top: 4px; }
+  .result .state { font-family: var(--mono); font-size: 11px; letter-spacing: .04em; text-transform: uppercase; color: var(--in); }
+  .result h2 { font-family: var(--serif); font-size: 44px; line-height: 1.05; margin-top: 6px; overflow-wrap: anywhere; }
+  .result .meta { font-size: 14px; color: var(--muted); margin-top: 8px; }
+  .stats { display: flex; gap: 36px; flex-wrap: wrap; padding: 18px 0; border-top: 1px solid var(--border); border-bottom: 1px solid var(--border); }
+  .stats div { display: flex; flex-direction: column; gap: 4px; }
+  .stats b { font-family: var(--mono); font-weight: 500; font-size: 20px; color: var(--ink); letter-spacing: 0; }
+  .stats span { font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
+  .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  a.download { text-decoration: none; }
 
   /* ---- publish ---- */
-  .publish { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
-  .publish h2 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
-  .publish h2 .hint { margin-left: 6px; }
+  .publish { background: var(--paper); border: 1px solid var(--border-subtle); border-radius: var(--r-lg); padding: 20px 24px; display: flex; flex-direction: column; gap: 14px; }
+  .publish.setup { background: var(--paper-tint); }
+  .publish h3 { font-size: 14px; font-weight: 600; display: flex; justify-content: space-between; align-items: baseline; gap: 12px; flex-wrap: wrap; }
+  .publish h3 .hint { font-weight: 400; font-size: 13px; color: var(--muted); }
+  .publish h3 .hint b { color: var(--ink); font-weight: 500; }
   .publish textarea {
-    width: 100%; min-height: 64px; resize: vertical; background: var(--bg);
-    color: var(--text); border: 1px solid var(--line); border-radius: 9px;
-    padding: 8px 10px; font: inherit; font-size: 13px;
+    width: 100%; min-height: 80px; resize: vertical; background: var(--paper); color: var(--ink);
+    border: 1px solid var(--border); border-radius: var(--r-md); padding: 10px 14px; font: inherit; font-size: 14px;
+    letter-spacing: -0.025em; transition: border-color .15s;
   }
-  .publish textarea:focus { outline: none; border-color: var(--accent); }
-  .publish .actions { display: flex; gap: 12px; align-items: center; flex-wrap: wrap; }
-  .publish .actions .msg { margin-top: 14px; }
-  .publish a.posted { color: var(--ok); font-weight: 600; }
-  .publish .setup { color: var(--muted); font-size: 13px; }
-  .publish .setup code { color: var(--text); }
+  .publish textarea::placeholder { color: var(--faint); }
+  .publish textarea:focus { outline: none; border-color: var(--ink); }
+  .publish .actions .msg { font-size: 14px; }
+  .publish a.posted { color: var(--ink); font-weight: 500; display: inline-flex; align-items: center; gap: 8px; }
+  .publish .setup-text { font-size: 14px; color: var(--muted); }
+
+  @media (max-width: 900px) {
+    body { padding: 0 20px 48px; }
+    #home, body.working #home { grid-template-columns: 1fr; gap: 32px; margin-top: 40px; }
+    #home h1 { font-size: 44px; }
+    .review { grid-template-columns: 1fr; }
+    .dock { position: static; order: -1; flex-direction: row; align-items: flex-end; gap: 16px; }
+    .dock video { max-width: 200px; }
+    .output { grid-template-columns: 1fr; }
+    .output .frame { max-width: 300px; }
+  }
 </style>
 </head>
 <body>
 <main>
-  <h1>autocut</h1>
-  <p class="sub">Raw take in, vertical cut with captions out. You choose the cuts.</p>
+  <header>
+    <div class="wordmark">autocut<small>local</small></div>
+    <div class="meta">Everything runs on this Mac</div>
+  </header>
 
-  <div id="drop">
-    <strong>Drop a video here</strong>
-    <span>or click to choose &middot; mp4, mov, m4v</span>
-  </div>
-  <input id="file" type="file" accept="video/*" hidden>
-
-  <div class="options">
-    <label for="preset">Edit</label>
-    <select id="preset">
-      <option value="default">Default</option>
-      <option value="gentle">Gentle &mdash; pauses only</option>
-      <option value="aggressive">Aggressive &mdash; tight</option>
-    </select>
-  </div>
+  <section id="home">
+    <div>
+      <h1>Drop in a raw take.<br><em>Get back the cut.</em></h1>
+      <p class="lede">Dead air, filler words and botched retakes removed. Face-tracked framing. Karaoke captions in the style you choose. And nothing is cut until you say so.</p>
+      <ol class="rail">
+        <li>Upload a portrait video. It is split into parts while you wait.</li>
+        <li>Tick the parts that stay. Fix any word the recogniser doubted.</li>
+        <li>Render, download, or post it straight to Instagram.</li>
+      </ol>
+    </div>
+    <div class="intake">
+      <div id="drop">
+        <div class="glyph"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"></path><path d="M6 10l6-6 6 6"></path><path d="M4 20h16"></path></svg></div>
+        <strong>Drop a video here</strong>
+        <span>or click to choose &middot; <code>MP4 MOV M4V</code></span>
+      </div>
+      <input id="file" type="file" accept="video/*" hidden>
+      <div class="presets" role="radiogroup" aria-label="edit preset">
+        <span>Edit</span>
+        <label class="selected"><input type="radio" name="preset" value="default" checked>Default</label>
+        <label><input type="radio" name="preset" value="gentle">Gentle &mdash; pauses only</label>
+        <label><input type="radio" name="preset" value="aggressive">Aggressive &mdash; tight</label>
+      </div>
+    </div>
+  </section>
 
   <div id="jobs"></div>
 </main>
@@ -229,6 +334,13 @@ const drop = document.getElementById("drop");
 const input = document.getElementById("file");
 const jobsEl = document.getElementById("jobs");
 
+document.querySelectorAll(".presets input").forEach(radio => {
+  radio.addEventListener("change", () => {
+    document.querySelectorAll(".presets label").forEach(l => l.classList.toggle("selected", l.contains(radio)));
+  });
+});
+const PLAY = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linejoin="round"><path d="M7 4l13 8-13 8z"></path></svg>`;
+
 drop.addEventListener("click", () => input.click());
 drop.addEventListener("dragover", e => { e.preventDefault(); drop.classList.add("over"); });
 drop.addEventListener("dragleave", () => drop.classList.remove("over"));
@@ -245,7 +357,7 @@ input.addEventListener("change", () => {
 async function upload(file) {
   const body = new FormData();
   body.append("file", file);
-  body.append("preset", document.getElementById("preset").value);
+  body.append("preset", document.querySelector(".presets input:checked").value);
 
   const card = addCard(file.name);
   try {
@@ -266,12 +378,13 @@ function addCard(filename) {
   card.innerHTML = `
     <div class="row"><span class="name"></span><span class="pct"></span></div>
     <div class="bar"><i></i></div>
-    <div class="msg"></div>
     <ol class="stages">${STAGES.map(s => `<li data-stage="${s}">${LABELS[s]}</li>`).join("")}</ol>
+    <div class="msg"></div>
     <div class="review" hidden></div>
     <div class="output"></div>`;
   card.querySelector(".name").textContent = filename;
   jobsEl.prepend(card);
+  document.body.classList.add("working");
   return card;
 }
 
@@ -285,8 +398,11 @@ const time = seconds => {
 // pure function of the latest one -- no incremental state to get out of sync.
 function render(card, job) {
   const done = job.status === "done";
+  const stageLabel = LABELS[job.stage] || job.stage || "";
   card.querySelector(".pct").textContent =
-    done ? "done" : job.status === "review" ? "your turn" : `${job.percent || 0}%`;
+    done ? "done" : job.status === "review" ? "your turn" : `${stageLabel} · ${job.percent || 0}%`;
+  card.classList.toggle("finished", done);
+  card.classList.toggle("reviewing", job.status === "review");
   card.querySelector(".bar > i").style.width = `${done ? 100 : (job.percent || 0)}%`;
 
   const msg = card.querySelector(".msg");
@@ -313,16 +429,28 @@ function render(card, job) {
   if (done && job.summary && !card.querySelector(".output video")) {
     const s = job.summary;
     card.querySelector(".review").hidden = true;
+    const stem = escape(job.filename.replace(/\.[^.]+$/, ""));
     card.querySelector(".output").innerHTML = `
-      <video controls preload="metadata" src="/jobs/${card.dataset.id}/result"></video>
-      <div class="summary">
-        <b>${s.source_duration}s</b> &rarr; <b>${s.output_duration}s</b>
-        (${s.removed_percent}% removed) &middot; ${s.segments} segments &middot;
-        ${s.words} words &middot; ${s.tracked ? "face tracked" : "centre crop"} &middot;
-        rendered in ${s.elapsed}s
-      </div>
-      <a class="download" href="/jobs/${card.dataset.id}/result" download>Download</a>
-      <div class="publish"></div>`;
+      <div class="frame"><video controls preload="metadata" src="/jobs/${card.dataset.id}/result"></video></div>
+      <div class="result">
+        <div>
+          <div class="state">&#9679; Finished</div>
+          <h2>${stem}</h2>
+          <div class="meta">Rendered in ${s.elapsed}s &middot; ${s.tracked ? "face tracked" : "centre crop"} &middot; 1080&times;1920</div>
+        </div>
+        <div class="stats">
+          <div><b>${s.source_duration}s</b><span>source</span></div>
+          <div><b>${s.output_duration}s</b><span>final</span></div>
+          <div><b>${s.removed_percent}%</b><span>removed</span></div>
+          <div><b>${s.segments}</b><span>parts</span></div>
+          <div><b>${s.words}</b><span>words</span></div>
+          <div><b>${escape(job.caption_style || "classic")}</b><span>captions</span></div>
+        </div>
+        <div class="actions">
+          <a class="btn-primary lg download" href="/jobs/${card.dataset.id}/result" download>Download MP4</a>
+        </div>
+        <div class="publish"></div>
+      </div>`;
     showPublish(card);
   }
   if (done && job.publish) renderPublish(card, job.publish);
@@ -343,17 +471,18 @@ async function showPublish(card) {
   const panel = card.querySelector(".publish");
   const status = await instagram();
   if (!status.connected) {
+    panel.classList.add("setup");
     panel.innerHTML = `
-      <h2>Instagram</h2>
-      <div class="setup">Not connected: ${escape(status.error)}.
+      <h3>Post to Instagram <span class="hint">not connected</span></h3>
+      <div class="setup-text">${escape(status.error)}.
         Put <code>UPLOAD_POST_API_KEY</code> or <code>INSTAGRAM_ACCESS_TOKEN</code> in <code>.env</code> and restart &mdash; the README says how.</div>`;
     return;
   }
   panel.innerHTML = `
-    <h2>Post to Instagram <span class="hint">as @${escape(status.username)}${status.via === "upload-post" ? " via Upload-Post" : ""}</span></h2>
+    <h3>Post to Instagram <span class="hint">as <b>@${escape(status.username)}</b>${status.via === "upload-post" ? " &middot; via Upload-Post" : ""}</span></h3>
     <textarea placeholder="Caption (optional)" maxlength="2200"></textarea>
     <div class="actions">
-      <button class="primary">Publish as a Reel</button>
+      <button class="btn-primary">Publish as a Reel</button>
       <span class="msg"></span>
     </div>`;
   const button = panel.querySelector("button");
@@ -400,7 +529,7 @@ function renderPublish(card, publication) {
     button.hidden = true;
     textarea.disabled = true;
     msg.innerHTML = publication.permalink
-      ? `<a class="posted" href="${escape(publication.permalink)}" target="_blank" rel="noopener">Posted &mdash; open on Instagram &rarr;</a>`
+      ? `<a class="posted" href="${escape(publication.permalink)}" target="_blank" rel="noopener"><svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="var(--in)" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><path d="M20 6L9 17l-5-5"></path></svg>Posted &mdash; open on Instagram &rarr;</a>`
       : `<span class="posted">Posted</span>`;
     return;
   }
@@ -442,12 +571,12 @@ async function showStyles(card, panel) {
   const id = card.dataset.id;
   const list = await styles();
   const chosen = panel.dataset.style || "classic";
-  strip.innerHTML = list.map(s => `
+  strip.insertAdjacentHTML("beforeend", list.map(s => `
     <label class="style${s.name === chosen ? " selected" : ""}">
       <input type="radio" name="style-${id}" value="${escape(s.name)}"${s.name === chosen ? " checked" : ""}>
       <img src="/caption-styles/${escape(s.name)}.png" alt="">
       <span>${escape(s.label)}</span>
-    </label>`).join("");
+    </label>`).join(""));
   strip.addEventListener("change", event => {
     panel.dataset.style = event.target.value;
     strip.querySelectorAll(".style").forEach(l => l.classList.toggle("selected", l.contains(event.target)));
@@ -471,26 +600,45 @@ async function showReview(card, job) {
   }
 
   panel.innerHTML = `
-    <video controls preload="metadata" src="/jobs/${id}/preview"></video>
-    <div class="review-head">
-      <h2>Parts of the final video
-        <span class="hint">&middot; click a word to fix it; <b class="flag">marked</b> ones the recogniser doubted</span>
-      </h2>
-      <div class="bulk">
-        <button data-play="1">&#9654; play the edit</button>
-        <button data-all="1">keep all</button>
-        <button data-all="0">keep none</button>
+    <div class="list">
+      <div class="review-head">
+        <h2>Choose what stays
+          <span class="hint">Green means in. Click a <b class="flag">highlighted</b> word to fix it.</span>
+        </h2>
+        <div class="bulk">
+          <button data-play="1">${PLAY} Play the edit</button>
+          <button data-all="1">Keep all</button>
+          <button data-all="0">Keep none</button>
+        </div>
       </div>
+      <ul class="parts"></ul>
     </div>
-    <ul class="parts"></ul>
-    <div class="totals"></div>
-    <div class="styles-head">Caption style</div>
-    <div class="styles" role="radiogroup" aria-label="caption style"></div>
-    <button class="primary">Render</button>`;
+    <div class="dock">
+      <video controls preload="metadata" src="/jobs/${id}/preview"></video>
+      <div class="now"><span>Preview</span><span class="where"></span></div>
+    </div>
+    <div class="finish">
+      <div class="styles" role="radiogroup" aria-label="caption style"><span class="styles-head">Captions</span></div>
+      <div class="right">
+        <div class="totals"></div>
+        <button class="btn-primary lg primary">Render video</button>
+      </div>
+    </div>`;
   showStyles(card, panel);
 
   const video = panel.querySelector("video");
   const list = panel.querySelector("ul.parts");
+  // Which part is being heard, so the list can point at it.  Cleared when
+  // playback stops for any reason; "play the edit" marks nothing, it is all
+  // of them.
+  const where = panel.querySelector(".where");
+  const markPlaying = li => {
+    list.querySelectorAll("li.playing").forEach(other => other.classList.remove("playing"));
+    if (li) li.classList.add("playing");
+    where.textContent = li ? `part ${[...list.children].indexOf(li) + 1}` : "";
+  };
+  video.addEventListener("pause", () => markPlaying(null));
+  video.addEventListener("ended", () => markPlaying(null));
 
   for (const part of data.parts) {
     const li = document.createElement("li");
@@ -524,13 +672,13 @@ async function showReview(card, job) {
       <div class="cut-body">
         <div class="cut-meta">
           <span class="order"></span>
-          <span>${time(part.start)} &ndash; ${time(part.end)}</span>
-          <span>${part.duration.toFixed(1)}s</span>
+          <span class="when">${time(part.start)} &ndash; ${time(part.end)}</span>
+          <span class="len">${part.duration.toFixed(1)}s</span>
           ${tag}
         </div>
         <div class="cut-text">${body}</div>
       </div>
-      <button class="play">&#9654; hear</button>`;
+      <button class="play" title="hear this part">${PLAY}</button>`;
     li.classList.toggle("dropped", !part.keep);
 
     li.querySelector(".cut-toggle").addEventListener("click", event => {
@@ -543,6 +691,7 @@ async function showReview(card, job) {
     // Hearing a part plays exactly that part and stops -- it is one piece of
     // the final video, so that is the whole of what there is to judge.
     li.querySelector(".play").addEventListener("click", () => {
+      markPlaying(li);
       playSpans(video, [[part.start, part.end]]);
     });
     li.querySelectorAll(".w").forEach(word => bindWord(word, id, card));
@@ -563,6 +712,7 @@ async function showReview(card, job) {
   // Play every kept part back to back, skipping the rest: the edit as it will
   // be, before spending a render on finding out.
   panel.querySelector(".bulk button[data-play]").addEventListener("click", () => {
+    markPlaying(null);
     playSpans(video, keptParts(panel).map(li => [Number(li.dataset.start), Number(li.dataset.end)]));
   });
 
@@ -583,7 +733,7 @@ async function showReview(card, job) {
     });
     if (!response.ok) {
       button.disabled = false;
-      button.textContent = "Render";
+      button.textContent = "Render video";
       card.querySelector(".msg").textContent = `could not start render: ${await response.text()}`;
       card.querySelector(".msg").classList.add("error");
     }
@@ -672,7 +822,7 @@ function updateTotals(panel, duration) {
   const output = kept.reduce((total, li) => total + Number(li.dataset.duration), 0);
   const removed = duration - output;
   panel.querySelector(".totals").innerHTML =
-    `final video: <b>${output.toFixed(1)}s</b> from <b>${kept.length}</b> of ${items.length} parts ` +
+    `<b>${output.toFixed(1)}s</b> &nbsp;from ${kept.length} of ${items.length} parts ` +
     `&middot; ${removed.toFixed(1)}s dropped (${Math.round((removed / duration) * 100)}%)`;
 }
 
@@ -738,6 +888,7 @@ function listen(card, id) {
 
 // Pick up anything already running, so a reload does not lose a job.
 fetch("/jobs").then(r => r.json()).then(jobs => {
+  if (jobs.length) document.body.classList.add("working");
   for (const job of jobs.reverse()) {
     const card = addCard(job.filename);
     card.dataset.id = job.id;
