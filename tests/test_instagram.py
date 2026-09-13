@@ -185,15 +185,11 @@ class TestServer:
     """The job manager's side: one publish at a time, only of a finished video."""
 
     def _finished_job(self, tmp_path, video) -> tuple[JobManager, Job]:
-        from autocut.pipeline import Result
-        from autocut.models import Timeline
-
         manager = JobManager(tmp_path / "work")
         job = Job(id="j", filename="a.mp4", source=video, work_dir=tmp_path)
         job.status = "done"
-        job.result = Result(
-            output=video, timeline=Timeline(source=video, duration=1.0, fps=30, width=1080, height=1920), tracked=False, elapsed=1.0
-        )
+        job.output = video
+        job.summary = {"output": video.name}
         return manager, job
 
     def test_publishes_and_records_the_link(self, meta, video, tmp_path) -> None:

@@ -1,4 +1,4 @@
-"""The local web app: drop a video in, choose the cuts, download the result.
+"""The web app: drop a video in, choose the cuts, download the result.
 
 Uploading a video only gets as far as splitting it into parts.  Nothing is
 rendered until someone has been through them and ticked the ones the final
@@ -6,9 +6,11 @@ video is made of -- the detectors are good enough to propose and not good
 enough to decide, and the expensive stages are wasted on an edit that is going
 to be rejected.
 
-Bound to localhost and intended for one person on one machine, so there is no
-authentication and no upload size limit beyond what the pipeline itself
-enforces.
+Several people can use one instance.  Who they are comes from a proxy that
+has already signed them in (see ``auth``); without one configured the app is
+the single-user tool it started as.  Every job belongs to whoever uploaded
+it, and a job that is not yours does not exist as far as the API is
+concerned -- 404, not 403, so an id reveals nothing.
 """
 
 from __future__ import annotations
@@ -16,30 +18,42 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from pathlib import Path
+from typing import Annotated
 
-from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
+from fastapi import Body, Depends, FastAPI, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from autocut import publish
 from autocut.config import CAPTION_STYLE_LABELS, CAPTION_STYLES
 from autocut.publish.instagram import InstagramError
 
-from .jobs import PRESETS, JobManager
+from .auth import User, current_user, header_name
+from .jobs import PRESETS, BadUpload, Job, JobManager, QuotaExceeded
 from .samples import caption_sample
 
 log = logging.getLogger(__name__)
 
 STATIC = Path(__file__).parent / "static"
-WORK_ROOT = Path("work")
+#: Absolute so a service unit's working directory cannot move the data.
+WORK_ROOT = Path(os.environ.get("AUTOCUT_WORK_ROOT") or "work").resolve()
+DB_PATH = Path(os.environ["AUTOCUT_DB"]).resolve() if os.environ.get("AUTOCUT_DB") else None
 
-manager = JobManager(WORK_ROOT)
+manager = JobManager(WORK_ROOT, DB_PATH)
+
+Viewer = Annotated[User, Depends(current_user)]
 
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
+    if header_name():
+        log.info("multi-user: trusting %s for identity", header_name())
+    else:
+        log.info("single-user: no AUTOCUT_USER_HEADER set")
+    manager.load()
     manager.start()
     yield
     await manager.stop()
@@ -48,44 +62,69 @@ async def lifespan(app: FastAPI):
 app = FastAPI(title="autocut", lifespan=lifespan)
 
 
+def require_job(job_id: str, user: User) -> Job:
+    """The job, if it is this user's; otherwise it does not exist."""
+    job = manager.get(job_id)
+    if job is None or job.owner != user.email:
+        raise HTTPException(404, "no such job")
+    return job
+
+
 @app.get("/", response_class=HTMLResponse)
 async def index() -> str:
     return (STATIC / "index.html").read_text()
 
 
+@app.get("/me")
+async def me(user: Viewer) -> dict:
+    """Who the page is talking to, so it can say so."""
+    return {"email": user.email, "can_publish": user.can_publish, "local": user.is_local}
+
+
 @app.post("/jobs")
-async def create_job(file: UploadFile, preset: str = Form("default")) -> dict:
+async def create_job(user: Viewer, file: UploadFile, preset: str = Form("default")) -> dict:
     if preset not in PRESETS:
         raise HTTPException(400, f"unknown preset {preset!r}")
     if not file.filename:
         raise HTTPException(400, "no file was uploaded")
 
-    job = await manager.submit(file.filename, file.file, preset)
+    try:
+        job = await manager.submit(file.filename, file.file, preset, owner=user.email)
+    except QuotaExceeded as error:
+        raise HTTPException(429, str(error)) from error
+    except BadUpload as error:
+        raise HTTPException(413 if "upload limit" in str(error) else 400, str(error)) from error
     return job.snapshot()
 
 
 @app.get("/jobs")
-async def list_jobs() -> list[dict]:
+async def list_jobs(user: Viewer) -> list[dict]:
     return [
         job.snapshot()
-        for job in sorted(manager.jobs.values(), key=lambda j: j.created, reverse=True)
+        for job in sorted(manager.owned_by(user.email), key=lambda j: j.created, reverse=True)
     ]
 
 
 @app.get("/jobs/{job_id}")
-async def get_job(job_id: str) -> dict:
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
-    return job.snapshot()
+async def get_job(job_id: str, user: Viewer) -> dict:
+    return require_job(job_id, user).snapshot()
+
+
+@app.delete("/jobs/{job_id}")
+async def delete_job(job_id: str, user: Viewer) -> dict:
+    """Remove a job and every file it kept."""
+    job = require_job(job_id, user)
+    try:
+        await manager.delete(job)
+    except ValueError as error:
+        raise HTTPException(409, str(error)) from error
+    return {"deleted": job_id}
 
 
 @app.get("/jobs/{job_id}/events")
-async def job_events(job_id: str, request: Request) -> StreamingResponse:
+async def job_events(job_id: str, user: Viewer, request: Request) -> StreamingResponse:
     """Server-sent events carrying this job's progress."""
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
+    job = require_job(job_id, user)
 
     async def stream():
         queue = manager.subscribe(job)
@@ -95,7 +134,7 @@ async def job_events(job_id: str, request: Request) -> StreamingResponse:
                     break
                 snapshot = await queue.get()
                 yield f"data: {json.dumps(snapshot)}\n\n"
-                if snapshot["status"] in ("done", "error"):
+                if snapshot["status"] in ("done", "error", "deleted"):
                     break
         finally:
             manager.unsubscribe(job, queue)
@@ -110,11 +149,9 @@ async def job_events(job_id: str, request: Request) -> StreamingResponse:
 
 
 @app.get("/jobs/{job_id}/parts")
-async def job_parts(job_id: str) -> dict:
+async def job_parts(job_id: str, user: Viewer) -> dict:
     """The timeline split into parts, for choosing what the final video keeps."""
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
+    job = require_job(job_id, user)
     if job.timeline is None:
         raise HTTPException(409, f"job is {job.status}; nothing to review yet")
 
@@ -142,13 +179,12 @@ async def caption_style_sample(name: str) -> Response:
 @app.post("/jobs/{job_id}/render")
 async def render_job(
     job_id: str,
+    user: Viewer,
     keep: list[int] = Body(..., embed=True),
     style: str = Body("classic", embed=True),
 ) -> dict:
     """Stitch the chosen parts, in order, and render them in a caption style."""
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
+    job = require_job(job_id, user)
     if job.status in ("analyzing", "rendering"):
         raise HTTPException(409, f"job is already {job.status}")
 
@@ -160,15 +196,13 @@ async def render_job(
 
 
 @app.post("/jobs/{job_id}/captions")
-async def edit_captions(job_id: str, edits: list[dict] = Body(..., embed=True)) -> dict:
+async def edit_captions(job_id: str, user: Viewer, edits: list[dict] = Body(..., embed=True)) -> dict:
     """Correct misheard words before the captions are drawn.
 
     Returns the parts again rather than nothing, so the review screen redraws
     from the server's copy instead of trusting what it just typed.
     """
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
+    job = require_job(job_id, user)
     if job.status in ("analyzing", "rendering"):
         # The render stage reads the transcript off disk as it starts; editing
         # it underneath a running render would caption a video with words that
@@ -183,11 +217,9 @@ async def edit_captions(job_id: str, edits: list[dict] = Body(..., embed=True)) 
 
 
 @app.get("/jobs/{job_id}/preview")
-async def job_preview(job_id: str) -> FileResponse:
+async def job_preview(job_id: str, user: Viewer) -> FileResponse:
     """The review copy of the source, for hearing a cut before making it."""
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
+    job = require_job(job_id, user)
 
     preview = job.work_dir / "preview.mp4"
     if not preview.exists():
@@ -200,12 +232,16 @@ async def job_preview(job_id: str) -> FileResponse:
 
 
 @app.get("/instagram")
-async def instagram_status() -> dict:
+async def instagram_status(user: Viewer) -> dict:
     """Whether Instagram is connected, and as whom.
 
     Verified against Instagram rather than just "is the token set", so a
     revoked or expired token shows up here, before a render is spent on it.
+    The connection is the operator's own account; everyone else is told so
+    and downloads instead.
     """
+    if not user.can_publish:
+        return {"connected": False, "error": "publishing is only available to the operator", "operator_only": True}
     try:
         backend = publish.backend()
         if not backend.configured():
@@ -221,11 +257,11 @@ async def instagram_status() -> dict:
 
 
 @app.post("/jobs/{job_id}/publish")
-async def publish_job(job_id: str, caption: str = Body("", embed=True)) -> dict:
+async def publish_job(job_id: str, user: Viewer, caption: str = Body("", embed=True)) -> dict:
     """Post the finished video to Instagram as a Reel."""
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
+    job = require_job(job_id, user)
+    if not user.can_publish:
+        raise HTTPException(403, "publishing is only available to the operator")
     try:
         await manager.publish(job, caption.strip())
     except ValueError as error:
@@ -234,28 +270,24 @@ async def publish_job(job_id: str, caption: str = Body("", embed=True)) -> dict:
 
 
 @app.get("/jobs/{job_id}/publish")
-async def publish_status(job_id: str) -> dict:
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
+async def publish_status(job_id: str, user: Viewer) -> dict:
+    job = require_job(job_id, user)
     if job.publish is None:
         raise HTTPException(404, "this video has not been published")
     return job.publish.snapshot()
 
 
 @app.get("/jobs/{job_id}/result")
-async def job_result(job_id: str) -> FileResponse:
-    job = manager.get(job_id)
-    if job is None:
-        raise HTTPException(404, "no such job")
-    if job.status != "done" or job.result is None:
+async def job_result(job_id: str, user: Viewer) -> FileResponse:
+    job = require_job(job_id, user)
+    if job.status != "done" or job.output is None:
         raise HTTPException(409, f"job is {job.status}, not finished")
 
     # The download carries the render's timestamp, so two cuts of the same
     # source saved to the same folder do not overwrite each other.
-    stamp = job.result.output.stem.removeprefix("final-")
+    stamp = job.output.stem.removeprefix("final-")
     return FileResponse(
-        job.result.output,
+        job.output,
         media_type="video/mp4",
         filename=f"{Path(job.filename).stem}-{stamp}.mp4" if stamp else f"{Path(job.filename).stem}.mp4",
         headers={"Cache-Control": "no-store"},
