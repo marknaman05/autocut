@@ -34,6 +34,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import time
 import urllib.error
 import urllib.request
 from collections import Counter
@@ -247,12 +248,28 @@ def _ask_openrouter(prompt: str, config: RetakeConfig) -> dict:
             "X-Title": "autocut",
         },
     )
+    log.info(
+        "OpenRouter request: model=%s prompt_chars=%d", config.openrouter_model, len(prompt)
+    )
+    start = time.monotonic()
     try:
         with urllib.request.urlopen(request, timeout=config.timeout) as response:
-            body = json.loads(response.read())
+            raw = response.read()
     except urllib.error.HTTPError as error:
         detail = error.read().decode(errors="replace")[:200]
+        log.warning(
+            "OpenRouter call failed: status=%s detail=%r elapsed=%.2fs",
+            error.code, detail, time.monotonic() - start,
+        )
         raise RetakeValidationError(f"OpenRouter returned {error.code}: {detail!r}") from error
+    elapsed = time.monotonic() - start
+    body = json.loads(raw)
+
+    usage = body.get("usage", {})
+    log.info(
+        "OpenRouter response: elapsed=%.2fs prompt_tokens=%s completion_tokens=%s",
+        elapsed, usage.get("prompt_tokens"), usage.get("completion_tokens"),
+    )
 
     try:
         content = body["choices"][0]["message"]["content"]

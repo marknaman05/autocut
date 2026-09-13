@@ -251,8 +251,12 @@ async def job_result(job_id: str) -> FileResponse:
     if job.status != "done" or job.result is None:
         raise HTTPException(409, f"job is {job.status}, not finished")
 
+    # The download carries the render's timestamp, so two cuts of the same
+    # source saved to the same folder do not overwrite each other.
+    stamp = job.result.output.stem.removeprefix("final-")
     return FileResponse(
         job.result.output,
         media_type="video/mp4",
-        filename=f"{Path(job.filename).stem}-vertical.mp4",
+        filename=f"{Path(job.filename).stem}-{stamp}.mp4" if stamp else f"{Path(job.filename).stem}.mp4",
+        headers={"Cache-Control": "no-store"},
     )
