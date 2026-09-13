@@ -70,6 +70,22 @@ def _loudnorm_filter(config: EncodeConfig, measured: dict[str, str] | None) -> s
     )
 
 
+def caption_overlay_y(height: int, band_height: int, config: CaptionConfig) -> int:
+    """Where the caption band's top edge goes, for the configured position.
+
+    Clamped to the frame in every case: a band taller than the margin allows
+    moves inward rather than off the edge, and a band taller than the frame
+    itself starts at the top.
+    """
+    if config.position == "bottom":
+        return max(height - config.margin_v - band_height, 0)
+    if config.position == "top":
+        return max(min(config.margin_v, height - band_height), 0)
+    if config.position == "centre":
+        return max((height - band_height) // 2, 0)
+    raise ValueError(f"unknown caption position {config.position!r}")
+
+
 def compose(
     source: Path,
     destination: Path,
@@ -90,7 +106,7 @@ def compose(
 
     if captions is not None:
         listing, band_height = captions
-        overlay_y = max(height - caption_config.margin_v - band_height, 0)
+        overlay_y = caption_overlay_y(height, band_height, caption_config)
         inputs += ["-f", "concat", "-safe", "0", "-i", str(listing)]
         graph = (
             f"{video_chain}[framed];"

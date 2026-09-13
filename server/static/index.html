@@ -155,6 +155,23 @@
   .totals { margin-top: 14px; font-size: 13px; color: var(--muted); }
   .totals b { color: var(--text); }
 
+  /* ---- caption style ---- */
+  .styles-head { margin-top: 18px; font-size: 14px; font-weight: 600; }
+  .styles {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(160px, 1fr));
+    gap: 8px; margin-top: 8px;
+  }
+  .style {
+    position: relative; display: block; border: 1px solid var(--line); border-radius: 9px;
+    padding: 6px; background: var(--bg); cursor: pointer; transition: border-color .15s;
+  }
+  .style:hover { border-color: var(--muted); }
+  .style.selected { border-color: var(--accent); }
+  .style input { position: absolute; opacity: 0; width: 0; height: 0; }
+  .style img { display: block; width: 100%; border-radius: 6px; background: #1c2129; }
+  .style span { display: block; margin-top: 5px; font-size: 12px; color: var(--muted); text-align: center; }
+  .style.selected span { color: var(--accent); }
+
   /* ---- publish ---- */
   .publish { margin-top: 18px; border-top: 1px solid var(--line); padding-top: 16px; }
   .publish h2 { font-size: 14px; margin: 0 0 8px; font-weight: 600; }
@@ -412,6 +429,31 @@ function renderPublish(card, publication) {
   }
 }
 
+// The looks on offer, fetched once per page.  Each card's picture is drawn by
+// the renderer that captions the video, so the picker is never a mock-up.
+let captionStyles = null;
+function styles() {
+  if (!captionStyles) captionStyles = fetch("/caption-styles").then(r => r.json());
+  return captionStyles;
+}
+
+async function showStyles(card, panel) {
+  const strip = panel.querySelector(".styles");
+  const id = card.dataset.id;
+  const list = await styles();
+  const chosen = panel.dataset.style || "classic";
+  strip.innerHTML = list.map(s => `
+    <label class="style${s.name === chosen ? " selected" : ""}">
+      <input type="radio" name="style-${id}" value="${escape(s.name)}"${s.name === chosen ? " checked" : ""}>
+      <img src="/caption-styles/${escape(s.name)}.png" alt="">
+      <span>${escape(s.label)}</span>
+    </label>`).join("");
+  strip.addEventListener("change", event => {
+    panel.dataset.style = event.target.value;
+    strip.querySelectorAll(".style").forEach(l => l.classList.toggle("selected", l.contains(event.target)));
+  });
+}
+
 async function showReview(card, job) {
   const id = card.dataset.id;
   const panel = card.querySelector(".review");
@@ -442,7 +484,10 @@ async function showReview(card, job) {
     </div>
     <ul class="parts"></ul>
     <div class="totals"></div>
+    <div class="styles-head">Caption style</div>
+    <div class="styles" role="radiogroup" aria-label="caption style"></div>
     <button class="primary">Render</button>`;
+  showStyles(card, panel);
 
   const video = panel.querySelector("video");
   const list = panel.querySelector("ul.parts");
@@ -534,7 +579,7 @@ async function showReview(card, job) {
     const response = await fetch(`/jobs/${id}/render`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ keep }),
+      body: JSON.stringify({ keep, style: panel.dataset.style || "classic" }),
     });
     if (!response.ok) {
       button.disabled = false;

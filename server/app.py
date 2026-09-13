@@ -20,12 +20,14 @@ from contextlib import asynccontextmanager
 from pathlib import Path
 
 from fastapi import Body, FastAPI, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
 
 from autocut import publish
+from autocut.config import CAPTION_STYLE_LABELS, CAPTION_STYLES
 from autocut.publish.instagram import InstagramError
 
 from .jobs import PRESETS, JobManager
+from .samples import caption_sample
 
 log = logging.getLogger(__name__)
 
@@ -122,9 +124,28 @@ async def job_parts(job_id: str) -> dict:
     }
 
 
+@app.get("/caption-styles")
+async def caption_styles() -> list[dict]:
+    """The caption looks on offer, in display order."""
+    return [{"name": name, "label": CAPTION_STYLE_LABELS[name]} for name in CAPTION_STYLES]
+
+
+@app.get("/caption-styles/{name}.png")
+async def caption_style_sample(name: str) -> Response:
+    """A sample of one style, drawn by the renderer that captions the video."""
+    if name not in CAPTION_STYLES:
+        raise HTTPException(404, "no such caption style")
+    image = await asyncio.to_thread(caption_sample, name)
+    return Response(image, media_type="image/png", headers={"Cache-Control": "max-age=3600"})
+
+
 @app.post("/jobs/{job_id}/render")
-async def render_job(job_id: str, keep: list[int] = Body(..., embed=True)) -> dict:
-    """Stitch the chosen parts, in order, and render them."""
+async def render_job(
+    job_id: str,
+    keep: list[int] = Body(..., embed=True),
+    style: str = Body("classic", embed=True),
+) -> dict:
+    """Stitch the chosen parts, in order, and render them in a caption style."""
     job = manager.get(job_id)
     if job is None:
         raise HTTPException(404, "no such job")
@@ -132,7 +153,7 @@ async def render_job(job_id: str, keep: list[int] = Body(..., embed=True)) -> di
         raise HTTPException(409, f"job is already {job.status}")
 
     try:
-        await manager.approve(job, keep)
+        await manager.approve(job, keep, style)
     except ValueError as error:
         raise HTTPException(400, str(error)) from error
     return job.snapshot()

@@ -12,7 +12,7 @@ import logging
 import sys
 from pathlib import Path
 
-from .config import DEFAULT
+from .config import CAPTION_STYLES, DEFAULT
 
 
 def _configure_logging(verbose: bool) -> None:
@@ -59,6 +59,7 @@ def _cmd_render(args: argparse.Namespace) -> int:
         preset = preset.gentle()
     elif args.preset == "aggressive":
         preset = preset.aggressive()
+    preset = preset.with_caption_style(args.caption_style)
 
     source = Path(args.input)
     work_dir = Path(args.work_dir or f"work/{source.stem}")
@@ -133,6 +134,10 @@ def main(argv: list[str] | None = None) -> int:
     render_parser.add_argument("--work-dir", default=None)
     render_parser.add_argument(
         "--preset", choices=("default", "gentle", "aggressive"), default="default"
+    )
+    render_parser.add_argument(
+        "--caption-style", choices=tuple(CAPTION_STYLES), default="classic",
+        help="the caption look; the web app shows a sample of each",
     )
     render_parser.set_defaults(func=_cmd_render)
 

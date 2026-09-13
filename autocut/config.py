@@ -194,7 +194,8 @@ class CaptionConfig:
     """
 
     enabled: bool = True
-    #: Font family name; resolved to a file by ``render.captions.find_font``.
+    #: Font file stem or family name; resolved by ``render.captions.find_font``,
+    #: which looks in the bundled ``render/fonts`` directory before the system.
     font: str = "Arial Black"
     font_size: int = 82
     text_colour: str = "#FFFFFF"
@@ -203,8 +204,36 @@ class CaptionConfig:
     outline: int = 8
     shadow_offset: int = 4
     shadow_colour: str = "#00000099"
-    #: Distance from the bottom of the frame, clear of platform UI.
+    #: Draw every word in capitals.  Applied at draw time only, so the
+    #: transcript, the review screen and any caption correction keep the
+    #: case that was spoken; only the picture changes.
+    uppercase: bool = False
+    #: Where the caption band sits: ``"bottom"``, ``"centre"`` or ``"top"``.
+    #: ``margin_v`` is the distance from that edge, and ignored for centre.
+    position: str = "bottom"
+    #: Distance from the chosen edge of the frame, clear of platform UI.
     margin_v: int = 420
+    #: Glyph colour of the active word when it sits on a box, where the
+    #: highlight colour is usually the box and the text wants to stay white.
+    #: ``None`` means ``highlight_colour``, which is what every style without
+    #: a box wants.
+    active_text_colour: str | None = None
+    #: A rounded box drawn behind the active word -- the "pill" that a lot of
+    #: short-form captioning does instead of recolouring the word.  ``None``
+    #: draws nothing.
+    active_box_colour: str | None = None
+    #: A rounded box behind the whole line, for subtitle-block styles.  Takes
+    #: ``#RRGGBBAA`` so the block can be translucent.  ``None`` draws nothing.
+    line_box_colour: str | None = None
+    #: How far a box extends past the glyphs on each side, and its corner
+    #: radius.  One pair for both kinds of box so a pill inside a line block
+    #: never disagrees with it.
+    box_padding: int = 14
+    box_radius: int = 18
+    #: Blur radius of a soft copy of the outline drawn under the text, in the
+    #: outline colour -- a neon halo.  0 disables it.  Each frame costs one
+    #: blur of the band, a few milliseconds.
+    glow: int = 0
     max_words_per_line: int = 4
     max_chars_per_line: int = 22
     #: A pause longer than this always breaks the caption line.
@@ -227,6 +256,59 @@ class CaptionConfig:
     #: lasts.  Set ``pop_duration`` to 0 to disable the animation.
     pop_scale: float = 1.14
     pop_duration: float = 0.09
+
+
+#: The caption looks a person can choose between, each a delta from the
+#: default.  Order is display order.  A style is a *look* only: the timing
+#: fields (``offset``, ``min_visible_fraction``) and ``review_confidence``
+#: are carried over from the preset by ``Preset.with_caption_style`` rather
+#: than reset here, so switching styles never moves a caption in time.
+CAPTION_STYLES: dict[str, CaptionConfig] = {
+    # The original: heavy sans, white words, the spoken one in yellow.
+    "classic": CaptionConfig(),
+    # Shouted caps, three words at a time, no pop -- the words are already
+    # as big as they get.
+    "hormozi": replace(
+        CaptionConfig(), font="Anton-Regular", font_size=96, uppercase=True,
+        outline=10, shadow_offset=6, max_words_per_line=3, pop_duration=0.0,
+    ),
+    # White words throughout; the spoken one sits on a purple pill instead
+    # of changing colour.  A lighter pop, because the pill already moves.
+    "pill": replace(
+        CaptionConfig(), font="Montserrat-ExtraBold", active_box_colour="#7C3AED",
+        active_text_colour="#FFFFFF", highlight_colour="#FFFFFF", outline=4, pop_scale=1.06,
+    ),
+    # Smaller, thinner, unanimated; the spoken word is not marked at all.
+    # For talking heads whose words are not the point.
+    "minimal": replace(
+        CaptionConfig(), font="Montserrat-SemiBold", font_size=64, outline=2,
+        shadow_offset=3, highlight_colour="#FFFFFF", pop_duration=0.0,
+    ),
+    # A subtitle block: the whole line on translucent black, no outline
+    # needed because the box provides the contrast.
+    "boxed": replace(
+        CaptionConfig(), font="Montserrat-ExtraBold", font_size=72, line_box_colour="#000000B3",
+        outline=0, shadow_offset=0, max_words_per_line=5, max_chars_per_line=28,
+    ),
+    # Tall condensed caps in the middle of the frame with a cyan halo; the
+    # spoken word fills with a paler cyan -- the same cyan as the outline
+    # would swallow its edges.
+    "neon": replace(
+        CaptionConfig(), font="BebasNeue-Regular", font_size=110, uppercase=True,
+        outline_colour="#22D3EE", outline=4, glow=18, highlight_colour="#67E8F9",
+        position="centre", shadow_offset=0,
+    ),
+}
+
+#: What each style is called in the web app and the CLI's help.
+CAPTION_STYLE_LABELS: dict[str, str] = {
+    "classic": "Classic",
+    "hormozi": "Bold caps",
+    "pill": "Pill",
+    "minimal": "Minimal",
+    "boxed": "Boxed",
+    "neon": "Neon",
+}
 
 
 @dataclass(frozen=True)
@@ -319,6 +401,32 @@ class Preset:
             self,
             silence=replace(self.silence, min_gap=0.22, pad=0.06, sentence_pause=0.3),
             retake=replace(self.retake, max_removal_ratio=0.45),
+        )
+
+    def with_caption_style(self, name: str) -> Preset:
+        """The same edit, captioned in a named style.
+
+        Styles are whole ``CaptionConfig``s, so the fields that are not about
+        looks -- whether captions are on, the timing nudge, the visibility
+        threshold, what the review screen flags -- are copied over from this
+        preset rather than taken from the style.  Otherwise choosing a look
+        would silently undo a timing correction.
+        """
+        try:
+            style = CAPTION_STYLES[name]
+        except KeyError:
+            choices = ", ".join(CAPTION_STYLES)
+            raise ValueError(f"unknown caption style {name!r}; choose from {choices}") from None
+        current = self.caption
+        return replace(
+            self,
+            caption=replace(
+                style,
+                enabled=current.enabled,
+                offset=current.offset,
+                min_visible_fraction=current.min_visible_fraction,
+                review_confidence=current.review_confidence,
+            ),
         )
 
 

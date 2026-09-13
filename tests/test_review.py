@@ -234,8 +234,8 @@ class TestCoalesce:
         assert merge.coalesce([]) == []
 
 
-@pytest.fixture
-def job(tmp_path) -> Job:
+def make_job(tmp_path) -> Job:
+    """A job at the review stage, with one retake and one trailing silence."""
     words = [
         Word(text="the", start=0.0, end=0.3),
         Word(text="first", start=0.3, end=0.6),
@@ -266,6 +266,11 @@ def job(tmp_path) -> Job:
         id="test", filename="input.mp4", source=tmp_path / "input.mp4",
         work_dir=tmp_path, timeline=timeline,
     )
+
+
+@pytest.fixture
+def job(tmp_path) -> Job:
+    return make_job(tmp_path)
 
 
 class TestPartsPayload:
@@ -574,3 +579,25 @@ class TestCaptionPayload:
     def test_a_confident_word_is_not_marked(self, job) -> None:
         spoken = next(p for p in job.parts() if p["words"])
         assert not any(w["uncertain"] for w in spoken["caption"])
+
+
+class TestCaptionStyleChoice:
+    """The look chosen on the review screen travels with the render."""
+
+    def test_the_style_is_recorded_and_shown(self, job) -> None:
+        asyncio.run(JobManager(job.work_dir).approve(job, [1], "hormozi"))
+        assert job.caption_style == "hormozi"
+        assert job.snapshot()["caption_style"] == "hormozi"
+        assert "bold caps captions" in job.message
+        assert job.preset_config.caption.uppercase
+
+    def test_the_default_is_classic(self, job) -> None:
+        asyncio.run(JobManager(job.work_dir).approve(job, [1]))
+        assert job.caption_style == "classic"
+
+    def test_an_unknown_style_changes_nothing(self, job) -> None:
+        job.keep = [0]
+        with pytest.raises(ValueError, match="nope"):
+            asyncio.run(JobManager(job.work_dir).approve(job, [1], "nope"))
+        assert job.keep == [0]
+        assert job.caption_style == "classic"

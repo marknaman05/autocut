@@ -22,7 +22,7 @@ from pathlib import Path
 
 from autocut.analyze import merge
 from autocut.audio import Envelope
-from autocut.config import DEFAULT, Preset
+from autocut.config import CAPTION_STYLE_LABELS, CAPTION_STYLES, DEFAULT, Preset
 from autocut.models import Timeline
 from autocut.pipeline import Progress, Result, part_envelope, propose, render_edit
 from autocut import publish
@@ -80,6 +80,8 @@ class Job:
     #: edit can be revised: the proposals never change, the answers do.
     timeline: Timeline | None = None
     keep: list[int] | None = None
+    #: The caption look chosen on the review screen; a key of CAPTION_STYLES.
+    caption_style: str = "classic"
     #: Where the finished video has been sent, if anywhere.  Separate from the
     #: job's own status: a failed publish does not un-finish a render, and the
     #: file is still there to download.
@@ -103,6 +105,7 @@ class Job:
             "message": self.message,
             "error": self.error,
             "created": self.created.isoformat(),
+            "caption_style": self.caption_style,
         }
         if self.timeline is not None:
             data["parts"] = len(self.parts())
@@ -139,8 +142,8 @@ class Job:
 
     @property
     def preset_config(self) -> Preset:
-        """The resolved preset this job was submitted with."""
-        return PRESETS.get(self.preset, DEFAULT)
+        """The resolved preset this job was submitted with, in its caption style."""
+        return PRESETS.get(self.preset, DEFAULT).with_caption_style(self.caption_style)
 
     def parts(self) -> list[dict]:
         """The timeline as an ordered list of parts, for review.
@@ -305,10 +308,14 @@ class JobManager:
     def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
 
-    async def approve(self, job: Job, keep: list[int]) -> Job:
+    async def approve(self, job: Job, keep: list[int], style: str = "classic") -> Job:
         """Accept the parts a person chose to keep, and queue the render."""
         if job.timeline is None:
             raise ValueError("this job has no parts to review yet")
+        # Checked before anything on the job changes, so a bad style leaves
+        # the previous answers intact.
+        if style not in CAPTION_STYLES:
+            raise ValueError(f"unknown caption style {style!r}")
         count = len(job.parts())
         unknown = [index for index in keep if not 0 <= index < count]
         if unknown:
@@ -317,10 +324,14 @@ class JobManager:
             raise ValueError("keep at least one part")
 
         job.keep = sorted(set(keep))
+        job.caption_style = style
         job.status = "queued"
         job.stage = "queued"
         job.percent = 0
-        job.message = f"stitching {len(job.keep)} of {count} parts"
+        job.message = (
+            f"stitching {len(job.keep)} of {count} parts, "
+            f"{CAPTION_STYLE_LABELS[style].lower()} captions"
+        )
         job.error = None
         self._publish(job)
         await self._queue.put((job.id, "render"))
@@ -498,7 +509,7 @@ class JobManager:
             render_edit,
             job.work_dir,
             job.keep or [],
-            PRESETS[job.preset],
+            job.preset_config,
             self._reporter(job),
         )
         job.result = result
