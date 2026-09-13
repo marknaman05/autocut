@@ -14,9 +14,12 @@ try:
     # OPENROUTER_API_KEY and the AUTOCUT_* switches -- this is a local
     # single-user tool, so a dotfile beats exporting vars by hand.  Values
     # already in the real environment win over the file.
-    from dotenv import load_dotenv
+    from dotenv import find_dotenv, load_dotenv
 
+    # The working directory first, then the checkout this file lives in,
+    # so a service unit started from elsewhere still finds the same file.
     load_dotenv()
+    load_dotenv(find_dotenv())
 except ModuleNotFoundError:  # pragma: no cover - dotenv is a declared dep
     pass
 
@@ -356,6 +359,14 @@ class Preset:
     asr_backend: str = "mlx-whisper"
     asr_model: str = "mlx-community/whisper-large-v3-turbo"
     language: str | None = "en"
+    #: Re-read any stretch this long or longer that the recogniser returned
+    #: no words for but which carries sustained speech.  Whisper swallows an
+    #: immediately repeated sentence -- a retake -- into the previous word's
+    #: timestamp; transcribed on its own, the repeat is heard fine.  Set to 0
+    #: to disable.  Shorter stretches are left alone: below a second there
+    #: is not a sentence to recover, and the second pass would be invited to
+    #: guess at a breath.
+    retranscribe_holes: float = 0.8
 
     #: Keep segments shorter than this read as glitches and are dropped.
     min_segment: float = 0.25

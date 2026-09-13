@@ -165,6 +165,55 @@ Either way, a Reel is limited to 15 minutes and 1 GB, and an expired or
 revoked key shows up on the finished card as "Not connected" with the
 service's own reason.
 
+## Serving it to other people
+
+Several people can use one instance, each seeing only their own videos. The
+app does no login of its own; it trusts a request header set by a proxy that
+already did, and it is only safe because that proxy is the only way in.
+
+**The trust model, in three sentences.** With `AUTOCUT_USER_HEADER` unset the
+app is the single-user tool it always was: everyone is `local`, so nothing
+changes at `localhost:8000`. With it set, every request must carry that
+header or it is refused, and every job belongs to the address in it. So the
+app must bind to `127.0.0.1` and be reached only through the tunnel — never
+`--host 0.0.0.0` with the header set, or anyone could send the header
+themselves.
+
+The recommended setup runs from a Mac you keep on, behind
+[Cloudflare Tunnel](https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/)
+and Cloudflare Access (both free at this scale):
+
+1. Run the app as a service: edit and install `deploy/com.autocut.server.plist`
+   (paths, `AUTOCUT_OWNERS`, data directory). It binds to `127.0.0.1:8000`.
+2. Run the tunnel: `deploy/cloudflared.example.yml` has the commands. Point
+   `autocut.yourdomain.com` at `http://localhost:8000`.
+3. In Cloudflare Zero Trust, add an **Access application** for that hostname
+   with a policy allowing the invitees' email addresses (one-time PIN login
+   needs no identity provider). **The policy is mandatory**: Access is what
+   sets `Cf-Access-Authenticated-User-Email`, and without it the app answers
+   401 to everyone, which is the safe failure.
+4. Keep the Mac awake on power: `sudo pmset -c sleep 0 disablesleep 1`.
+
+What people get: upload, review, caption style, render, download. Publishing
+to Instagram uses *your* connection, so only the addresses in
+`AUTOCUT_OWNERS` see it. What keeps your disk and your evening safe:
+
+- one video renders at a time, and a waiting job shows how many are ahead;
+- uploads are capped (`AUTOCUT_MAX_UPLOAD_BYTES`, 2 GB) and limited to a
+  Reel's length (`AUTOCUT_MAX_DURATION`, 15 min); each person may hold
+  `AUTOCUT_MAX_JOBS_PER_USER` (10) videos and `AUTOCUT_MAX_BYTES_PER_USER`
+  (10 GB), with `AUTOCUT_MAX_ACTIVE_PER_USER` (2) in progress;
+- a render's intermediates are deleted the moment it finishes; the upload
+  stays so the edit can be revised, until the whole job expires after
+  `AUTOCUT_RETENTION_DAYS` (7) — the finished screen says when — or is
+  deleted by its owner;
+- jobs survive a restart: a job caught mid-render goes back to the review
+  screen with a note to render again.
+
+`AUTOCUT_WORK_ROOT` and `AUTOCUT_DB` set where the data lives (absolute paths
+for a service). Tell invitees that it is your laptop: it is up when you are,
+and a long upload rides on your home connection.
+
 ## How it works
 
 ```
@@ -242,6 +291,17 @@ against the waveform instead, and the render never fails for want of it.
 And a gap in the *transcript* is not a gap in the *audio* — Whisper drops words
 — so only the genuinely silent stretches inside a gap are cut, never the gap as
 a whole.
+
+The commonest dropped words are a whole repeated sentence. Whisper decodes
+thirty seconds at a time and will not say the same thing twice within one
+window, so a restarted line comes back once, with the last word's timestamp
+stretched over the repeat. Once the timings are repaired that leaves a hole:
+seconds of speech with no words. Any such hole is cut out and transcribed on
+its own, where the recogniser — with nothing before it to repeat — reads the
+second copy fine; the words go back in at their real times, the retake
+detector sees the repeat, and whichever copy you keep has captions. A hole
+whose second reading is a lone doubtful word is left as it was and shown as
+"check this" rather than captioned with a guess.
 
 None of these apply to cuts a person approved in the web app: a deliberate
 choice is taken literally.

@@ -1,10 +1,13 @@
 """Job registry and worker.
 
-Single user, single machine, so there is no database and no task broker: jobs
-live in a dict and their files live on disk.  What does need care is that the
-pipeline is blocking and GPU-bound, so it runs in a worker thread and exactly
-one job runs at a time -- two concurrent renders on one machine finish no
-sooner and make progress reporting meaningless.
+One machine, so there is no task broker: jobs live in a dict, their files in
+a work directory, and a row per job in SQLite so a restart picks them back
+up.  What does need care is that the pipeline is blocking and GPU-bound, so
+it runs in a worker thread and exactly one job runs at a time -- two
+concurrent renders on one machine finish no sooner and make progress
+reporting meaningless -- and, now that several people share the machine, it
+is also what keeps one person's ten-minute upload from taking the whole
+thing over.
 
 Progress arrives on the worker thread and has to reach subscribers on the event
 loop, which is what ``call_soon_threadsafe`` below is for.
@@ -13,8 +16,8 @@ loop, which is what ``call_soon_threadsafe`` below is for.
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
-import shutil
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -24,9 +27,14 @@ from autocut.analyze import merge
 from autocut.audio import Envelope
 from autocut.config import CAPTION_STYLE_LABELS, CAPTION_STYLES, DEFAULT, Preset
 from autocut.models import Timeline
+from autocut.ingest import probe
 from autocut.pipeline import Progress, Result, part_envelope, propose, render_edit
 from autocut import publish
 from autocut.publish.instagram import InstagramError
+
+from . import retention
+from .auth import LOCAL
+from .store import Row, Store
 
 log = logging.getLogger(__name__)
 
@@ -59,6 +67,19 @@ class Publication:
             "error": self.error,
         }
 
+    @classmethod
+    def from_snapshot(cls, data: dict) -> Publication:
+        fields = ("status", "message", "caption", "permalink", "media_id", "error")
+        return cls(**{k: data[k] for k in fields if data.get(k) is not None})
+
+
+class QuotaExceeded(ValueError):
+    """An upload refused for want of room, with a message naming the limit."""
+
+
+class BadUpload(ValueError):
+    """An upload refused because it is not a video this can work on."""
+
 
 @dataclass
 class Job:
@@ -66,6 +87,9 @@ class Job:
     filename: str
     source: Path
     work_dir: Path
+    #: Whose job this is; every route checks it.  ``local`` when running
+    #: single-user.
+    owner: str = LOCAL
     preset: str = "default"
     #: queued -> analyzing -> review -> rendering -> done, or error at any point.
     #: ``review`` is where the job waits for a person to say which of the
@@ -75,7 +99,12 @@ class Job:
     percent: int = 0
     message: str = "waiting to start"
     error: str | None = None
-    result: Result | None = None
+    #: The finished video and what it is made of, set when a render
+    #: finishes and kept in the row so a restart still has them.
+    output: Path | None = None
+    summary: dict | None = None
+    #: Size of the upload, for the per-user budget.
+    bytes: int = 0
     #: The proposals, and the parts a person chose to keep.  Kept apart so an
     #: edit can be revised: the proposals never change, the answers do.
     timeline: Timeline | None = None
@@ -86,6 +115,8 @@ class Job:
     #: job's own status: a failed publish does not un-finish a render, and the
     #: file is still there to download.
     publish: Publication | None = None
+    #: How many jobs are ahead of this one, while it waits; None otherwise.
+    position: int | None = None
     created: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     subscribers: list[asyncio.Queue] = field(default_factory=list, repr=False)
     #: Cached by :meth:`envelope`.  The flag is separate from the value so that
@@ -105,29 +136,51 @@ class Job:
             "message": self.message,
             "error": self.error,
             "created": self.created.isoformat(),
+            "expires": retention.expires_at(self.created).isoformat(),
             "caption_style": self.caption_style,
         }
+        if self.position is not None:
+            data["position"] = self.position
         if self.timeline is not None:
             data["parts"] = len(self.parts())
             data["source_duration"] = round(self.timeline.duration, 1)
-        if self.result is not None:
-            timeline = self.result.timeline
-            data["summary"] = {
-                "source_duration": round(timeline.duration, 1),
-                "output_duration": round(timeline.kept_duration, 1),
-                "removed_percent": round(self.result.removed_fraction * 100),
-                "segments": len(timeline.keep_segments),
-                "words": len(timeline.words),
-                "tracked": self.result.tracked,
-                "elapsed": round(self.result.elapsed),
-                #: The file's own name, which changes with every render; the
-                #: browser puts it in the result URL so a new cut is never
-                #: served from cache.
-                "output": self.result.output.name,
-            }
+        if self.summary is not None:
+            data["summary"] = self.summary
         if self.publish is not None:
             data["publish"] = self.publish.snapshot()
         return data
+
+    @staticmethod
+    def summarise(result: Result) -> dict:
+        timeline = result.timeline
+        return {
+            "source_duration": round(timeline.duration, 1),
+            "output_duration": round(timeline.kept_duration, 1),
+            "removed_percent": round(result.removed_fraction * 100),
+            "segments": len(timeline.keep_segments),
+            "words": len(timeline.words),
+            "tracked": result.tracked,
+            "elapsed": round(result.elapsed),
+            #: The file's own name, which changes with every render; the
+            #: browser puts it in the result URL so a new cut is never
+            #: served from cache.
+            "output": result.output.name,
+        }
+
+    @property
+    def active(self) -> bool:
+        """Occupying, or waiting for, the worker."""
+        return self.status in ("queued", "analyzing", "rendering")
+
+    def row(self) -> Row:
+        return Row(
+            id=self.id, owner=self.owner, filename=self.filename, preset=self.preset,
+            caption_style=self.caption_style, status=self.status, stage=self.stage,
+            message=self.message, error=self.error, keep=self.keep, summary=self.summary,
+            output=self.output.name if self.output else None,
+            publish=self.publish.snapshot() if self.publish else None,
+            created=self.created, bytes=self.bytes,
+        )
 
 
     def envelope(self) -> Envelope | None:
@@ -260,10 +313,14 @@ class Job:
 class JobManager:
     """Owns every job and the single worker that renders them."""
 
-    def __init__(self, root: Path) -> None:
+    def __init__(self, root: Path, db: Path | None = None) -> None:
         self.root = Path(root)
         self.root.mkdir(parents=True, exist_ok=True)
+        self.store = Store(db or self.root / "autocut.db")
         self.jobs: dict[str, Job] = {}
+        #: The queue's contents, in order, so a job can be told how many
+        #: are ahead of it; ``asyncio.Queue`` cannot be looked into.
+        self._pending: list[str] = []
         #: (job id, phase) -- one worker runs both phases, so a render can
         #: never start while another job is still transcribing.
         self._queue: asyncio.Queue[tuple[str, str]] = asyncio.Queue()
@@ -271,24 +328,103 @@ class JobManager:
         #: In-flight publishes.  Held so the event loop cannot collect a task
         #: that nothing else references before it finishes.
         self._publishing: set[asyncio.Task] = set()
+        self._sweeper: asyncio.Task | None = None
+
+    def load(self) -> None:
+        """Pick up every job the previous process knew about.
+
+        Whatever was mid-flight when the process died is put back where a
+        person can act on it: a job that was still being analysed has
+        nothing on disk worth keeping and asks for the upload again; one that
+        was rendering has its proposals and its answers, so it goes back to
+        review with a note to render again.
+        """
+        for row in self.store.all():
+            work_dir = self.root / row.id
+            source = next(work_dir.glob("input.*"), work_dir / "input.mp4")
+            job = Job(
+                id=row.id, filename=row.filename, source=source, work_dir=work_dir,
+                owner=row.owner, preset=row.preset, caption_style=row.caption_style,
+                status=row.status, stage=row.stage, message=row.message, error=row.error,
+                keep=row.keep, summary=row.summary, bytes=row.bytes, created=row.created,
+                output=work_dir / row.output if row.output else None,
+                publish=Publication.from_snapshot(row.publish) if row.publish else None,
+            )
+            timeline_path = work_dir / "timeline.json"
+            if timeline_path.exists():
+                try:
+                    job.timeline = Timeline(**json.loads(timeline_path.read_text()))
+                except (OSError, ValueError) as error:
+                    log.warning("job %s: could not read timeline: %s", job.id, error)
+
+            if job.status == "analyzing" or (job.status == "queued" and job.timeline is None):
+                job.status, job.error, job.message = "error", "interrupted by a restart", "upload it again"
+            elif job.status in ("queued", "rendering"):
+                job.status, job.stage, job.percent = "review", "review", 100
+                job.message = "render interrupted by a restart; render again"
+                job.error = None
+            elif job.status == "done" and (job.output is None or not job.output.exists()):
+                job.status, job.error, job.message = "error", "the finished video is gone", "render again"
+                job.summary = None
+            elif job.status == "review" and job.timeline is None:
+                job.status, job.error, job.message = "error", "the analysis is gone", "upload it again"
+            if job.publish is not None and job.publish.status == "publishing":
+                job.publish.status, job.publish.error, job.publish.message = "error", "interrupted by a restart", "failed"
+            self.jobs[job.id] = job
+            self.store.save(job.row())
+        if self.jobs:
+            log.info("picked up %d jobs from the previous run", len(self.jobs))
 
     def start(self) -> None:
         if self._worker is None or self._worker.done():
             self._worker = asyncio.create_task(self._run_worker())
+        if self._sweeper is None or self._sweeper.done():
+            self._sweeper = asyncio.create_task(self._sweep_forever())
 
     async def stop(self) -> None:
-        if self._worker is not None:
-            self._worker.cancel()
-            try:
-                await self._worker
-            except asyncio.CancelledError:
-                pass
-            self._worker = None
+        for task in (self._worker, self._sweeper):
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+        self._worker = self._sweeper = None
 
-    async def submit(self, filename: str, stream, preset: str = "default") -> Job:
-        """Save an upload and queue it for rendering."""
+    def owned_by(self, owner: str) -> list[Job]:
+        return [job for job in self.jobs.values() if job.owner == owner]
+
+    def check_room(self, owner: str) -> None:
+        """Refuse an upload before a byte lands if the owner has no room."""
+        mine = self.owned_by(owner)
+        active = sum(1 for job in mine if job.active)
+        if active >= retention.max_active_per_user():
+            raise QuotaExceeded(
+                f"you already have {active} videos in progress; wait for one to finish"
+            )
+        if len(mine) >= retention.max_jobs_per_user():
+            raise QuotaExceeded(
+                f"you have {len(mine)} videos, the most this keeps; delete one to upload another"
+            )
+        used = sum(job.bytes for job in mine)
+        if used >= retention.max_bytes_per_user():
+            raise QuotaExceeded(
+                f"your videos take {retention.format_bytes(used)}, the most this keeps; "
+                "delete one to upload another"
+            )
+
+    async def submit(self, filename: str, stream, preset: str = "default", owner: str = LOCAL) -> Job:
+        """Save an upload and queue it for analysis.
+
+        The file is checked as it arrives and again once it has landed:
+        streamed to disk with a running count so a runaway upload is cut off
+        at the cap rather than after, then probed so that something that is
+        not a video, or is longer than a Reel can be, never reaches the
+        worker.  Either failure removes what was written.
+        """
         if preset not in PRESETS:
             raise ValueError(f"unknown preset {preset!r}")
+        self.check_room(owner)
 
         job_id = uuid.uuid4().hex[:12]
         work_dir = self.root / job_id
@@ -297,20 +433,99 @@ class JobManager:
         # Keep the original suffix: ffmpeg uses it as a demuxer hint.
         suffix = Path(filename).suffix or ".mp4"
         source = work_dir / f"input{suffix}"
-        with source.open("wb") as destination:
-            await asyncio.to_thread(shutil.copyfileobj, stream, destination)
+        cap = retention.max_upload_bytes()
+
+        def receive() -> int:
+            written = 0
+            with source.open("wb") as destination:
+                while chunk := stream.read(1024 * 1024):
+                    written += len(chunk)
+                    if written > cap:
+                        raise BadUpload(
+                            f"that file is over the {retention.format_bytes(cap)} upload limit"
+                        )
+                    destination.write(chunk)
+            return written
+
+        try:
+            size = await asyncio.to_thread(receive)
+            probed = await asyncio.to_thread(probe, source)
+            if probed.duration > retention.max_duration():
+                raise BadUpload(
+                    f"that video is {probed.duration / 60:.1f} minutes; the most this takes "
+                    f"is {retention.max_duration() / 60:.0f} (a Reel's limit)"
+                )
+        except BadUpload:
+            retention.remove_job_dir(work_dir)
+            raise
+        except Exception as error:  # noqa: BLE001 - anything ffprobe rejects is "not a video"
+            retention.remove_job_dir(work_dir)
+            # The detail names paths on this machine; it belongs in the log.
+            log.info("refused upload %r from %s: %s", filename, owner, error)
+            raise BadUpload("that does not look like a video this can read") from error
 
         job = Job(
-            id=job_id, filename=filename, source=source, work_dir=work_dir, preset=preset
+            id=job_id, filename=filename, source=source, work_dir=work_dir,
+            owner=owner, preset=preset, bytes=size,
         )
         self.jobs[job_id] = job
-        await self._queue.put((job_id, "propose"))
+        await self._enqueue(job, "propose")
         self.start()
-        log.info("queued job %s (%s)", job_id, filename)
+        log.info("queued job %s (%s) for %s", job_id, filename, owner)
         return job
 
     def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
+
+    async def delete(self, job: Job) -> None:
+        """Remove a job and everything it stored."""
+        if job.status in ("analyzing", "rendering"):
+            raise ValueError(f"the job is {job.status}; wait for it to finish")
+        if job.id in self._pending:
+            # Queued but not started: pull it before the worker gets there.
+            self._pending.remove(job.id)
+            self._positions()
+        self.jobs.pop(job.id, None)
+        self.store.delete(job.id)
+        await asyncio.to_thread(retention.remove_job_dir, job.work_dir)
+        job.status, job.message = "deleted", "deleted"
+        for queue in list(job.subscribers):
+            queue.put_nowait(job.snapshot())
+        log.info("deleted job %s (%s)", job.id, job.filename)
+
+    async def _enqueue(self, job: Job, phase: str) -> None:
+        self._pending.append(job.id)
+        self._positions()
+        await self._queue.put((job.id, phase))
+
+    def _positions(self) -> None:
+        """Tell every waiting job how many are ahead of it."""
+        for index, job_id in enumerate(self._pending):
+            job = self.jobs.get(job_id)
+            if job is not None and job.position != index:
+                job.position = index
+                self._publish(job)
+
+    async def _sweep_forever(self) -> None:
+        """Expire old jobs, hourly.  Runs once at startup too."""
+        while True:
+            try:
+                await self.sweep()
+            except Exception:  # noqa: BLE001 - a failed sweep must not stop the sweeper
+                log.exception("retention sweep failed")
+            await asyncio.sleep(3600)
+
+    async def sweep(self, now: datetime | None = None) -> int:
+        """Delete every job past its retention window; returns how many."""
+        expired = [
+            job for job in list(self.jobs.values())
+            if retention.expired(job.created, now) and not job.active
+        ]
+        for job in expired:
+            await self.delete(job)
+        if expired:
+            log.info("expired %d jobs", len(expired))
+        return len(expired)
 
     async def approve(self, job: Job, keep: list[int], style: str = "classic") -> Job:
         """Accept the parts a person chose to keep, and queue the render."""
@@ -333,12 +548,13 @@ class JobManager:
         # directory never holds two finished videos to confuse, and so does
         # anything published from it.  The new one gets its own name (see
         # ``_render``), so no browser can mistake a cached copy for it.
-        if job.result is not None:
+        if job.output is not None:
             try:
-                job.result.output.unlink(missing_ok=True)
+                job.output.unlink(missing_ok=True)
             except OSError as error:
-                log.warning("job %s: could not remove %s: %s", job.id, job.result.output, error)
-        job.result = None
+                log.warning("job %s: could not remove %s: %s", job.id, job.output, error)
+        job.output = None
+        job.summary = None
         job.publish = None
         job.status = "queued"
         job.stage = "queued"
@@ -349,7 +565,7 @@ class JobManager:
         )
         job.error = None
         self._publish(job)
-        await self._queue.put((job.id, "render"))
+        await self._enqueue(job, "render")
         self.start()
         return job
 
@@ -400,7 +616,7 @@ class JobManager:
         transcription.  One publish per job at a time, though -- a second
         click while the first is uploading would post the video twice.
         """
-        if job.status != "done" or job.result is None:
+        if job.status != "done" or job.output is None:
             raise ValueError(f"job is {job.status}, not finished")
         if job.publish is not None and job.publish.status == "publishing":
             raise ValueError("this video is already being published")
@@ -429,7 +645,7 @@ class JobManager:
         try:
             posted = await asyncio.to_thread(
                 publish.backend().publish_reel,
-                job.result.output,
+                job.output,
                 publication.caption,
                 report=report,
             )
@@ -462,6 +678,11 @@ class JobManager:
             job.subscribers.remove(queue)
 
     def _publish(self, job: Job) -> None:
+        if job.id in self.jobs:
+            try:
+                self.store.save(job.row())
+            except Exception:  # noqa: BLE001 - a row that fails to write must not stop the render
+                log.exception("job %s: could not save", job.id)
         snapshot = job.snapshot()
         for queue in list(job.subscribers):
             queue.put_nowait(snapshot)
@@ -469,9 +690,14 @@ class JobManager:
     async def _run_worker(self) -> None:
         while True:
             job_id, phase = await self._queue.get()
+            if job_id in self._pending:
+                self._pending.remove(job_id)
             job = self.jobs.get(job_id)
             if job is None:
+                self._queue.task_done()
                 continue
+            job.position = None
+            self._positions()
             try:
                 if phase == "propose":
                     await self._propose(job)
@@ -532,10 +758,14 @@ class JobManager:
             self._reporter(job),
             output_name=f"final-{stamp}.mp4",
         )
-        job.result = result
+        job.output = result.output
+        job.summary = Job.summarise(result)
         job.status = "done"
         job.stage = "done"
         job.percent = 100
         job.message = "finished"
         self._publish(job)
-        log.info("job %s finished in %.0fs", job.id, result.elapsed)
+        # The upload stays -- a second render cuts from it -- but the
+        # intermediates are re-creatable and add up across users.
+        freed = await asyncio.to_thread(retention.drop_intermediates, job.work_dir)
+        log.info("job %s finished in %.0fs; freed %s", job.id, result.elapsed, retention.format_bytes(freed))
