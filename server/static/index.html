@@ -147,6 +147,16 @@
   ol.stages li.done::before { background: var(--in); }
   .card.finished .bar, .card.finished .stages, .card.finished .pct, .card.reviewing .bar, .card.reviewing .stages { display: none; }
   .card.finished > .msg:not(.error) { display: none; }
+  .card .row .aside { display: flex; align-items: baseline; gap: 14px; }
+  .card .delete { background: none; border: 0; color: var(--faint); font-size: 13px; padding: 0; }
+  .card .delete:hover:not(:disabled) { color: var(--out); }
+  .card.error .name { color: var(--muted); }
+  .kept { font-size: 13px; color: var(--faint); }
+  #toast {
+    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%); background: var(--ink);
+    color: var(--paper); padding: 10px 16px; border-radius: var(--r-md); font-size: 14px; max-width: 640px;
+  }
+  #toast[hidden] { display: none; }
 
   /* ---- review ---- */
   .review { display: grid; grid-template-columns: minmax(0, 1fr) 320px; gap: 32px; align-items: start; border-top: 1px solid var(--border-subtle); padding-top: 20px; }
@@ -285,7 +295,7 @@
 <main>
   <header>
     <div class="wordmark">autocut<small>local</small></div>
-    <div class="meta">Everything runs on this Mac</div>
+    <div class="meta" id="whoami">Everything runs on this Mac</div>
   </header>
 
   <section id="home">
@@ -368,21 +378,46 @@ async function upload(file) {
     render(card, job);
     listen(card, job.id);
   } catch (error) {
-    render(card, { status: "error", message: "upload failed", error: String(error), percent: 0 });
+    card.remove();
+    if (!jobsEl.children.length) document.body.classList.remove("working");
+    toast(`Could not upload: ${String(error.message || error).replace(/^\{"detail":"|"\}$/g, "")}`);
   }
+}
+
+// One line at the bottom of the page for things that are not about one
+// card -- a refused upload, mostly.
+let toastTimer = null;
+function toast(text) {
+  let el = document.getElementById("toast");
+  if (!el) { el = document.createElement("div"); el.id = "toast"; document.body.appendChild(el); }
+  el.textContent = text;
+  el.hidden = false;
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(() => { el.hidden = true; }, 8000);
+}
+
+async function removeJob(card) {
+  const id = card.dataset.id;
+  if (!id) { card.remove(); return; }
+  if (!confirm("Delete this video and everything kept for it? This cannot be undone.")) return;
+  const response = await fetch(`/jobs/${id}`, { method: "DELETE" });
+  if (!response.ok) { toast(`Could not delete: ${await response.text()}`); return; }
+  card.remove();
+  if (!jobsEl.children.length) document.body.classList.remove("working");
 }
 
 function addCard(filename) {
   const card = document.createElement("div");
   card.className = "card";
   card.innerHTML = `
-    <div class="row"><span class="name"></span><span class="pct"></span></div>
+    <div class="row"><span class="name"></span><span class="aside"><span class="pct"></span><button class="delete" title="delete this video and everything kept for it">Delete</button></span></div>
     <div class="bar"><i></i></div>
     <ol class="stages">${STAGES.map(s => `<li data-stage="${s}">${LABELS[s]}</li>`).join("")}</ol>
     <div class="msg"></div>
     <div class="review" hidden></div>
     <div class="output"></div>`;
   card.querySelector(".name").textContent = filename;
+  card.querySelector(".delete").addEventListener("click", () => removeJob(card));
   jobsEl.prepend(card);
   document.body.classList.add("working");
   return card;
@@ -399,10 +434,18 @@ const time = seconds => {
 function render(card, job) {
   const done = job.status === "done";
   const stageLabel = LABELS[job.stage] || job.stage || "";
+  const waiting = job.status === "queued" && job.position != null;
   card.querySelector(".pct").textContent =
-    done ? "done" : job.status === "review" ? "your turn" : `${stageLabel} · ${job.percent || 0}%`;
+    done ? "done"
+    : job.status === "review" ? "your turn"
+    : job.status === "error" ? "failed"
+    : waiting ? (job.position ? `queued · ${job.position} ahead` : "queued · next")
+    : `${stageLabel} · ${job.percent || 0}%`;
   card.classList.toggle("finished", done);
   card.classList.toggle("reviewing", job.status === "review");
+  card.classList.toggle("error", job.status === "error");
+  card.querySelector(".delete").disabled = job.status === "analyzing" || job.status === "rendering";
+  if (job.status === "deleted") { card.remove(); return; }
   card.querySelector(".bar > i").style.width = `${done ? 100 : (job.percent || 0)}%`;
 
   const msg = card.querySelector(".msg");
@@ -448,6 +491,7 @@ function render(card, job) {
           <div class="state">&#9679; Finished</div>
           <h2>${stem}</h2>
           <div class="meta">Rendered in ${s.elapsed}s &middot; ${s.tracked ? "face tracked" : "centre crop"} &middot; 1080&times;1920</div>
+          <div class="kept">Kept until ${job.expires ? new Date(job.expires).toLocaleDateString(undefined, { day: "numeric", month: "long" }) : "removed by you"}</div>
         </div>
         <div class="stats">
           <div><b>${s.source_duration}s</b><span>source</span></div>
@@ -497,6 +541,11 @@ function instagram() {
 async function showPublish(card) {
   const panel = card.querySelector(".publish");
   const status = await instagram();
+  if (status.operator_only) {
+    // Not theirs to use; the download is the whole of what they get.
+    panel.remove();
+    return;
+  }
   if (!status.connected) {
     panel.classList.add("setup");
     panel.innerHTML = `
@@ -918,6 +967,10 @@ function listen(card, id) {
   };
   source.onerror = close;
 }
+
+fetch("/me").then(r => r.ok ? r.json() : null).then(me => {
+  if (me && !me.local) document.getElementById("whoami").textContent = me.email;
+}).catch(() => {});
 
 // Pick up anything already running, so a reload does not lose a job.
 fetch("/jobs").then(r => r.json()).then(jobs => {

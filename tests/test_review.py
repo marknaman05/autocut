@@ -607,28 +607,27 @@ class TestRenderAgain:
     """Going back from a finished video to the edit and rendering once more."""
 
     def test_a_finished_job_can_be_approved_again(self, job) -> None:
-        from autocut.pipeline import Result
         from server.jobs import Publication
 
         job.status = "done"
-        job.result = Result(output=job.work_dir / "final.mp4", timeline=job.timeline)
+        job.output = job.work_dir / "final.mp4"
+        job.summary = {"output": "final.mp4"}
         job.publish = Publication(status="published", permalink="https://instagram.com/reel/x/")
         asyncio.run(JobManager(job.work_dir).approve(job, [0, 1], "neon"))
         assert job.status == "queued"
         assert job.keep == [0, 1]
         assert job.caption_style == "neon"
-        assert job.result is None
+        assert job.output is None
+        assert job.summary is None
         assert job.publish is None
         assert "publish" not in job.snapshot()
         assert "summary" not in job.snapshot()
 
     def test_a_rerender_removes_the_previous_file(self, job) -> None:
-        from autocut.pipeline import Result
-
         old = job.work_dir / "final-20260101-000000.mp4"
         old.write_bytes(b"old cut")
         job.status = "done"
-        job.result = Result(output=old, timeline=job.timeline)
+        job.output = old
         asyncio.run(JobManager(job.work_dir).approve(job, [0]))
         assert not old.exists()
 

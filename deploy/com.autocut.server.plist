@@ -1,0 +1,75 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Runs the autocut web app as a launchd user agent: starts at login, restarts
+  if it dies, logs to ~/Library/Logs/autocut/.
+
+  Install:   cp deploy/com.autocut.server.plist ~/Library/LaunchAgents/
+             (edit the three paths and the environment first)
+  Start:     launchctl load ~/Library/LaunchAgents/com.autocut.server.plist
+  Stop:      launchctl unload ~/Library/LaunchAgents/com.autocut.server.plist
+  Logs:      tail -f ~/Library/Logs/autocut/server.log
+
+  Binds to 127.0.0.1 only.  The tunnel (deploy/cloudflared.example.yml) is
+  the only way in, which is what makes trusting AUTOCUT_USER_HEADER safe.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.autocut.server</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>/Users/YOU/.local/bin/uv</string>
+    <string>run</string>
+    <string>uvicorn</string>
+    <string>server.app:app</string>
+    <string>--host</string>
+    <string>127.0.0.1</string>
+    <string>--port</string>
+    <string>8000</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>/Users/YOU/Development/autocut</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <!-- Multi-user: trust the address Cloudflare Access signed in. -->
+    <key>AUTOCUT_USER_HEADER</key>
+    <string>Cf-Access-Authenticated-User-Email</string>
+    <!-- Who may publish through the Instagram connection in .env: you. -->
+    <key>AUTOCUT_OWNERS</key>
+    <string>you@example.com</string>
+    <!-- Absolute, so nothing depends on where this was started from. -->
+    <key>AUTOCUT_WORK_ROOT</key>
+    <string>/Users/YOU/autocut-data/work</string>
+    <key>AUTOCUT_DB</key>
+    <string>/Users/YOU/autocut-data/autocut.db</string>
+    <!-- Budgets; the defaults are shown. -->
+    <key>AUTOCUT_RETENTION_DAYS</key>
+    <string>7</string>
+    <key>AUTOCUT_MAX_UPLOAD_BYTES</key>
+    <string>2147483648</string>
+    <key>AUTOCUT_MAX_JOBS_PER_USER</key>
+    <string>10</string>
+    <key>AUTOCUT_MAX_BYTES_PER_USER</key>
+    <string>10737418240</string>
+    <!-- No Ollama needed if retakes go through OpenRouter (key in .env). -->
+    <key>AUTOCUT_RETAKE_BACKEND</key>
+    <string>openrouter</string>
+    <key>PATH</key>
+    <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+  <key>KeepAlive</key>
+  <true/>
+
+  <key>StandardOutPath</key>
+  <string>/Users/YOU/Library/Logs/autocut/server.log</string>
+  <key>StandardErrorPath</key>
+  <string>/Users/YOU/Library/Logs/autocut/server.log</string>
+</dict>
+</plist>

@@ -1,0 +1,23 @@
+# Cloudflare Tunnel: an outbound-only connection from this Mac to Cloudflare,
+# so autocut.yourdomain.com reaches the app with no port opened and no IP
+# revealed.  Access (see README) does the login and adds the header the app
+# trusts.
+#
+#   brew install cloudflared
+#   cloudflared tunnel login
+#   cloudflared tunnel create autocut          # prints the UUID used below
+#   cloudflared tunnel route dns autocut autocut.yourdomain.com
+#   cp deploy/cloudflared.example.yml ~/.cloudflared/config.yml   # edit
+#   sudo cloudflared service install           # runs at boot
+#
+tunnel: <TUNNEL-UUID>
+credentials-file: /Users/YOU/.cloudflared/<TUNNEL-UUID>.json
+
+ingress:
+  - hostname: autocut.yourdomain.com
+    service: http://localhost:8000
+    originRequest:
+      # Uploads are large and slow; do not cut them off.
+      connectTimeout: 60s
+      noHappyEyeballs: true
+  - service: http_status:404
