@@ -38,6 +38,28 @@ CREATE TABLE IF NOT EXISTS jobs (
     share_token   TEXT
 );
 CREATE INDEX IF NOT EXISTS jobs_owner ON jobs (owner, created);
+-- How many videos each person has ever uploaded.  A ledger, not a count of
+-- the jobs table: a trial's credits are spent on upload and deleting the
+-- video afterwards does not hand one back.
+CREATE TABLE IF NOT EXISTS uploads (
+    owner  TEXT PRIMARY KEY,
+    count  INTEGER NOT NULL DEFAULT 0
+);
+-- The latest word from the payment gateway about each person's Pro
+-- subscription.  Written only by verified webhooks (see ``billing``); the
+-- status is what makes someone Pro.
+CREATE TABLE IF NOT EXISTS subscriptions (
+    owner           TEXT PRIMARY KEY,
+    subscription_id TEXT NOT NULL,
+    customer_id     TEXT NOT NULL,
+    status          TEXT NOT NULL,
+    updated         TEXT NOT NULL
+);
+-- Webhook deliveries already applied, so a retry changes nothing.
+CREATE TABLE IF NOT EXISTS webhook_events (
+    id       TEXT PRIMARY KEY,
+    received TEXT NOT NULL
+);
 """
 
 
@@ -114,6 +136,55 @@ class Store:
                 "SELECT COUNT(*), COALESCE(SUM(bytes), 0) FROM jobs WHERE owner = ?", (owner,)
             ).fetchone()
         return int(count), int(total)
+
+    def uploads_by(self, owner: str) -> int:
+        """Videos this owner has uploaded, ever."""
+        with self._connect() as db:
+            row = db.execute("SELECT count FROM uploads WHERE owner = ?", (owner,)).fetchone()
+        return int(row["count"]) if row else 0
+
+    def count_upload(self, owner: str) -> int:
+        """One more upload for this owner; returns the new total."""
+        with self._connect() as db:
+            db.execute(
+                "INSERT INTO uploads (owner, count) VALUES (?, 1) "
+                "ON CONFLICT(owner) DO UPDATE SET count = count + 1",
+                (owner,),
+            )
+            return int(db.execute("SELECT count FROM uploads WHERE owner = ?", (owner,)).fetchone()["count"])
+
+    def subscription(self, owner: str) -> dict | None:
+        """The gateway's latest word on this owner's subscription, if any."""
+        with self._connect() as db:
+            row = db.execute("SELECT * FROM subscriptions WHERE owner = ?", (owner,)).fetchone()
+        return dict(row) if row else None
+
+    def save_subscription(self, sub: dict) -> None:
+        """Newest event wins; an older delivery arriving late is ignored."""
+        with self._connect() as db:
+            db.execute(
+                """
+                INSERT INTO subscriptions (owner, subscription_id, customer_id, status, updated)
+                VALUES (:owner, :subscription_id, :customer_id, :status, :updated)
+                ON CONFLICT(owner) DO UPDATE SET
+                    subscription_id = excluded.subscription_id, customer_id = excluded.customer_id,
+                    status = excluded.status, updated = excluded.updated
+                WHERE excluded.updated >= subscriptions.updated
+                """,
+                sub,
+            )
+
+    def note_webhook(self, event_id: str) -> bool:
+        """Records a delivery; ``False`` if it was already seen."""
+        with self._connect() as db:
+            try:
+                db.execute(
+                    "INSERT INTO webhook_events (id, received) VALUES (?, ?)",
+                    (event_id, datetime.now().isoformat()),
+                )
+            except sqlite3.IntegrityError:
+                return False
+        return True
 
     @staticmethod
     def _row(r: sqlite3.Row) -> Row:

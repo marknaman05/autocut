@@ -105,6 +105,8 @@ class RetakeConfig:
     #: the environment.  Either way the n-gram detector still runs underneath
     #: and every proposal goes through the same validation, so a missing key or
     #: a bad response degrades to the deterministic path rather than failing.
+    #: ``"none"`` skips the model on purpose (n-gram detector only) -- for
+    #: exercising the app without spending a call per upload.
     backend: str = "ollama"
 
     # -- ollama backend -----------------------------------------------------
@@ -456,4 +458,16 @@ def _retake_from_env(retake: RetakeConfig) -> RetakeConfig:
     return replace(retake, **updates) if updates else retake
 
 
-DEFAULT = replace(Preset(), retake=_retake_from_env(Preset().retake))
+def _asr_from_env(preset: Preset) -> Preset:
+    """``AUTOCUT_ASR_BACKEND=openrouter`` moves transcription to OpenRouter's
+    hosted Whisper (needs ``OPENROUTER_API_KEY``); ``AUTOCUT_ASR_MODEL`` picks
+    the model for whichever backend is in use."""
+    updates: dict[str, object] = {}
+    if backend := os.environ.get("AUTOCUT_ASR_BACKEND"):
+        updates["asr_backend"] = backend
+    if model := os.environ.get("AUTOCUT_ASR_MODEL"):
+        updates["asr_model"] = model
+    return replace(preset, **updates) if updates else preset
+
+
+DEFAULT = _asr_from_env(replace(Preset(), retake=_retake_from_env(Preset().retake)))

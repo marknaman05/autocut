@@ -533,6 +533,12 @@ def detect(words: list[Word], config: RetakeConfig) -> list[RemovalSpan]:
     # unreachable or talking nonsense, we still catch the obvious cases.
     spans = _ngram_repeats(words, config)
 
+    if config.backend == "none":
+        # Deliberately no model: for working on the UI without paying for, or
+        # waiting on, a call per upload.  The result is the n-gram detector's.
+        log.info("retake backend is 'none'; n-gram detector only")
+        return spans
+
     try:
         spans += _llm_spans(words, config)
     except (RetakeValidationError, urllib.error.URLError, TimeoutError, OSError) as error:

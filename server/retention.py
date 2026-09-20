@@ -47,6 +47,11 @@ def max_bytes_per_user() -> int:
     return _int_env("AUTOCUT_MAX_BYTES_PER_USER", 10 * 1024**3)
 
 
+def trial_credits() -> int:
+    """Videos a trial may upload before being asked to upgrade."""
+    return _int_env("AUTOCUT_TRIAL_CREDITS", 3)
+
+
 def max_active_per_user() -> int:
     return _int_env("AUTOCUT_MAX_ACTIVE_PER_USER", 2)
 

@@ -32,7 +32,7 @@ from autocut.pipeline import Progress, Result, part_envelope, propose, render_ed
 from autocut import publish
 from autocut.publish.instagram import InstagramError
 
-from . import retention
+from . import retention, watermark
 from .auth import LOCAL
 from .store import Row, Store
 
@@ -469,10 +469,16 @@ class JobManager:
             owner=owner, preset=preset, bytes=size,
         )
         self.jobs[job_id] = job
+        # Counted once the upload is a job: a refused file costs nothing.
+        self.store.count_upload(owner)
         await self._enqueue(job, "propose")
         self.start()
         log.info("queued job %s (%s) for %s", job_id, filename, owner)
         return job
+
+    def uploads_by(self, owner: str) -> int:
+        """Videos this owner has ever uploaded, deleted ones included."""
+        return self.store.uploads_by(owner)
 
     def get(self, job_id: str) -> Job | None:
         return self.jobs.get(job_id)
@@ -551,6 +557,7 @@ class JobManager:
         if job.output is not None:
             try:
                 job.output.unlink(missing_ok=True)
+                watermark.drop_preview(job.output)
             except OSError as error:
                 log.warning("job %s: could not remove %s: %s", job.id, job.output, error)
         job.output = None

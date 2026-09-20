@@ -22,6 +22,8 @@ posted to Instagram (see below); nothing else leaves the machine.
   - an [OpenRouter](https://openrouter.ai) API key, set as `OPENROUTER_API_KEY`
     and selected with `AUTOCUT_RETAKE_BACKEND=openrouter`.
   Without either, a deterministic detector still catches repeated-phrase retakes.
+  `AUTOCUT_RETAKE_BACKEND=none` asks for exactly that on purpose -- for
+  working on the app without a model call per upload.
 
 ## Setup
 
@@ -68,6 +70,18 @@ Individual stages, for debugging:
 uv run autocut probe input.mp4
 uv run autocut transcribe input.mp4 --work-dir work/scratch
 ```
+
+### Transcription backend
+
+Words and their timings come from Whisper. By default that is
+`mlx-whisper` running locally on Apple silicon. Set
+`AUTOCUT_ASR_BACKEND=openrouter` to send the audio to OpenRouter's hosted
+`openai/whisper-large-v3` instead (reusing `OPENROUTER_API_KEY`): same model
+family, so the cuts come out the same, about a cent per 15 minutes of audio,
+several times faster, and no GPU or Mac required -- which is what lets the
+server live on an ordinary Linux box. Audio goes up as 32 kbps mono MP3; long
+recordings are sent in 20-minute chunks split on quiet moments. The trade is
+that the audio leaves the machine.
 
 ### Retake detection backend
 
@@ -194,9 +208,27 @@ and Cloudflare Access (both free at this scale):
    401 to everyone, which is the safe failure.
 4. Keep the Mac awake on power: `sudo pmset -c sleep 0 disablesleep 1`.
 
-What people get: upload, review, caption style, render, download. Publishing
-to Instagram uses *your* connection, so only the addresses in
-`AUTOCUT_OWNERS` see it. What keeps your disk and your evening safe:
+Cloudflare will not proxy a request over **100 MB**, and a raw phone take is
+several times that, so the page sends anything larger in 50 MB parts -- with
+a progress bar, and a part that drops is retried on its own -- and the app
+lands them at their offsets in one file under `AUTOCUT_WORK_ROOT/uploads`
+before queueing it exactly as a direct upload. Nothing to configure; a
+half-finished upload is removed when the app next starts.
+
+What people get: upload, review, caption style, render, and the finished
+video playing in the page. **Downloading it is the Pro plan**: the button on
+a free user's finished video is a lock that goes to `/pricing`, and the
+download route answers 402 to them regardless. Pro is bought through
+[Dodo Payments](https://dodopayments.com) (see below) or granted by hand: the
+`AUTOCUT_PRO` list in the environment (owners and the local user always
+are). A third list, `AUTOCUT_TRIAL`, gets the whole
+product -- downloads included -- for `AUTOCUT_TRIAL_CREDITS` (3) videos:
+after that, dropping a new file blurs the page behind the upgrade card,
+while everything already uploaded can still be re-rendered and downloaded.
+Credits are spent on upload and kept in the database, so deleting a video
+does not return one. Publishing to Instagram uses *your* connection,
+so only the addresses in `AUTOCUT_OWNERS` see it. What keeps your disk and
+your evening safe:
 
 - one video renders at a time, and a waiting job shows how many are ahead;
 - uploads are capped (`AUTOCUT_MAX_UPLOAD_BYTES`, 2 GB) and limited to a
@@ -213,6 +245,39 @@ to Instagram uses *your* connection, so only the addresses in
 `AUTOCUT_WORK_ROOT` and `AUTOCUT_DB` set where the data lives (absolute paths
 for a service). Tell invitees that it is your laptop: it is up when you are,
 and a long upload rides on your home connection.
+
+### Taking payment
+
+The pricing page's **Upgrade to Pro** button opens a Dodo Payments hosted
+checkout in the signed-in address's name; the card never touches this
+server. Dodo reports back over a webhook, and the subscription's latest
+status is what makes the address Pro -- `active` (or `past_due`, a failed
+renewal inside its grace period) unlocks the download, anything else does
+not. Subscribers get a **Manage subscription** button instead, which opens
+Dodo's customer portal for cancelling or changing the card. In the Dodo
+dashboard:
+
+1. Toggle **Test mode** on (top of the dashboard) and create a subscription
+   product -- "autocut Pro", $9 / month. Copy its `pdt_...` id.
+2. **Developer → API keys**: create a key.
+3. **Developer → Webhooks**: add an endpoint for
+   `https://<your host>/billing/webhook`, subscribe it to the `subscription.*`
+   events, and copy its signing secret (`whsec_...`).
+4. Put the four values in `.env` (there is a block for them in
+   `.env.example`) together with `AUTOCUT_PUBLIC_URL`, and restart.
+
+The webhook must reach the app without a login. Behind Cloudflare Access,
+add a second Access application for the path
+`<your host>/billing/webhook` with a single **Bypass / Everyone** policy;
+every delivery is signature-checked, so that is safe. The endpoint is
+refused outright when `DODO_PAYMENTS_WEBHOOK_KEY` is unset, and a delivery
+is applied once even if Dodo retries it.
+
+Test mode uses Dodo's test cards (`4242 4242 4242 4242`, any future date).
+When the product is real, switch `DODO_PAYMENTS_ENVIRONMENT` to `live_mode`
+with live-mode keys, a live-mode product and a live-mode webhook endpoint.
+Without the Dodo variables the Upgrade button just says payments are not set
+up, and `AUTOCUT_PRO` is the only way to Pro.
 
 ## How it works
 

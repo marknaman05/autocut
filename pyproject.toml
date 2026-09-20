@@ -36,6 +36,7 @@ server = [
     "fastapi>=0.115",
     "uvicorn[standard]>=0.30",
     "python-multipart>=0.0.9",
+    "dodopayments[webhooks]>=1.50",
 ]
 
 [project.scripts]

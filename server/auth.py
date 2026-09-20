@@ -16,18 +16,29 @@ make this safe are stated here once and repeated in the README:
    0.0.0.0 with the header set: anyone could then send the header themselves.
 
 ``AUTOCUT_OWNERS`` lists the addresses that may use the operator's own
-Instagram connection; everyone else downloads.
+Instagram connection; everyone else downloads -- if they are on the paid
+plan.  ``AUTOCUT_PRO`` lists those; owners and the local user are on it
+without being listed.  A paid subscription (see ``billing``) makes someone Pro too: the app
+registers a lookup with ``plan_source`` and it is consulted before the trial
+list.  ``AUTOCUT_TRIAL`` lists people on a trial: the whole
+product, downloads included, for a few videos (``AUTOCUT_TRIAL_CREDITS``),
+after which a new upload is what asks them to upgrade -- re-rendering what
+they have stays free.  Everyone else may upload, review, render and watch
+the result in the page, but the download is behind the pricing page.
 """
 
 from __future__ import annotations
 
 import os
 from dataclasses import dataclass
+from typing import Callable
 
 from fastapi import HTTPException, Request
 
 HEADER_ENV = "AUTOCUT_USER_HEADER"
 OWNERS_ENV = "AUTOCUT_OWNERS"
+PRO_ENV = "AUTOCUT_PRO"
+TRIAL_ENV = "AUTOCUT_TRIAL"
 #: The identity of whoever runs the app on their own machine.
 LOCAL = "local"
 
@@ -37,10 +48,20 @@ class User:
     email: str
     #: May publish through the operator's Instagram connection.
     can_publish: bool
+    #: ``"free"``, ``"trial"`` or ``"pro"``.
+    plan: str = "pro"
 
     @property
     def is_local(self) -> bool:
         return self.email == LOCAL
+
+    @property
+    def can_download(self) -> bool:
+        return self.plan in ("pro", "trial")
+
+    @property
+    def uploads_are_metered(self) -> bool:
+        return self.plan == "trial"
 
 
 def header_name() -> str | None:
@@ -48,9 +69,39 @@ def header_name() -> str | None:
     return os.environ.get(HEADER_ENV) or None
 
 
-def owners() -> set[str]:
-    raw = os.environ.get(OWNERS_ENV, "")
+def _addresses(env: str) -> set[str]:
+    raw = os.environ.get(env, "")
     return {part.strip().lower() for part in raw.split(",") if part.strip()}
+
+
+def owners() -> set[str]:
+    return _addresses(OWNERS_ENV)
+
+
+def pro() -> set[str]:
+    return _addresses(PRO_ENV) | owners()
+
+
+def trial() -> set[str]:
+    return _addresses(TRIAL_ENV)
+
+
+#: Answers "has this address paid?"; the app points it at the subscriptions
+#: table once the store exists.  Nobody has paid until then.
+_paid: Callable[[str], bool] = lambda email: False
+
+
+def plan_source(paid: Callable[[str], bool]) -> None:
+    global _paid
+    _paid = paid
+
+
+def plan_for(email: str) -> str:
+    if email in pro() or _paid(email):
+        return "pro"
+    if email in trial():
+        return "trial"
+    return "free"
 
 
 def current_user(request: Request) -> User:
@@ -66,4 +117,8 @@ def current_user(request: Request) -> User:
     value = request.headers.get(header, "").strip().lower()
     if not value:
         raise HTTPException(401, "not signed in")
-    return User(email=value, can_publish=value in owners())
+    return User(
+        email=value,
+        can_publish=value in owners(),
+        plan=plan_for(value),
+    )

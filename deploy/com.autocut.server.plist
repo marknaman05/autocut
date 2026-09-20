@@ -41,6 +41,12 @@
     <!-- Who may publish through the Instagram connection in .env: you. -->
     <key>AUTOCUT_OWNERS</key>
     <string>you@example.com</string>
+    <!-- Who may download (owners always may); everyone else sees /pricing. -->
+    <key>AUTOCUT_PRO</key>
+    <string></string>
+    <!-- On a trial: the whole product for AUTOCUT_TRIAL_CREDITS (3) videos. -->
+    <key>AUTOCUT_TRIAL</key>
+    <string></string>
     <!-- Absolute, so nothing depends on where this was started from. -->
     <key>AUTOCUT_WORK_ROOT</key>
     <string>/Users/YOU/autocut-data/work</string>

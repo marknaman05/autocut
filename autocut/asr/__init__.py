@@ -34,4 +34,9 @@ def get_transcriber(backend: str, model: str) -> Transcriber:
         from .mlx_whisper import MlxWhisperTranscriber
 
         return MlxWhisperTranscriber(model)
+    if backend == "openrouter":
+        from .openrouter_whisper import DEFAULT_MODEL, OpenRouterWhisperTranscriber
+
+        # The preset's model names the MLX repo; it means nothing to the API.
+        return OpenRouterWhisperTranscriber(model if model.startswith("openai/") else DEFAULT_MODEL)
     raise ValueError(f"unknown ASR backend {backend!r}")

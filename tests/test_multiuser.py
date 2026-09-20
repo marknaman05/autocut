@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from autocut.models import KeepSegment, Timeline, Word
 from server import app as server_app
-from server import auth, retention
+from server import auth, retention, uploads
 from server.jobs import BadUpload, Job, JobManager, Publication, QuotaExceeded
 from server.store import Store
 
@@ -69,7 +69,11 @@ def plant(manager: JobManager, job_id: str, owner: str, status: str = "review", 
 
 class TestIdentity:
     def test_without_a_header_configured_everyone_is_local(self, client, manager) -> None:
-        assert client.get("/me").json() == {"email": "local", "can_publish": True, "local": True}
+        assert client.get("/me").json() == {
+            "email": "local", "can_publish": True, "plan": "pro", "credits": None, "local": True,
+            "part_size": uploads.PART_SIZE,
+            "billing": {"enabled": False, "environment": None, "subscription": None},
+        }
 
     def test_with_a_header_configured_it_is_required(self, client, manager, multiuser) -> None:
         assert client.get("/me").status_code == 401
@@ -77,7 +81,9 @@ class TestIdentity:
 
     def test_the_header_names_the_user(self, client, manager, multiuser) -> None:
         assert client.get("/me", headers=as_("Ann@Example.com")).json() == {
-            "email": "ann@example.com", "can_publish": False, "local": False,
+            "email": "ann@example.com", "can_publish": False, "plan": "free", "credits": None, "local": False,
+            "part_size": uploads.PART_SIZE,
+            "billing": {"enabled": False, "environment": None, "subscription": None},
         }
 
     def test_owners_may_publish(self, client, manager, multiuser) -> None:

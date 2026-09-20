@@ -8,7 +8,25 @@
 #   cloudflared tunnel create autocut          # prints the UUID used below
 #   cloudflared tunnel route dns autocut autocut.yourdomain.com
 #   cp deploy/cloudflared.example.yml ~/.cloudflared/config.yml   # edit
+#   cloudflared tunnel run autocut             # try it in the foreground
+#
+# As a service it runs as root and reads /etc/cloudflared, not ~/.cloudflared:
+#
+#   sudo mkdir -p /etc/cloudflared
+#   sudo cp ~/.cloudflared/config.yml ~/.cloudflared/<TUNNEL-UUID>.json /etc/cloudflared/
+#   sudo sed -i '' 's|/Users/YOU/.cloudflared/|/etc/cloudflared/|' /etc/cloudflared/config.yml
 #   sudo cloudflared service install           # runs at boot
+#
+# Some cloudflared builds install a plist that runs bare `cloudflared` with
+# no arguments and so exits at once; if the log says "use `cloudflared
+# tunnel run`", give it the arguments and reload:
+#
+#   P=/Library/LaunchDaemons/com.cloudflare.cloudflared.plist
+#   sudo launchctl unload $P
+#   sudo /usr/libexec/PlistBuddy -c "Add :ProgramArguments:1 string tunnel" \
+#                                -c "Add :ProgramArguments:2 string run" $P
+#   sudo launchctl load $P
+#   tail -f /Library/Logs/com.cloudflare.cloudflared.err.log   # "Registered tunnel connection"
 #
 tunnel: <TUNNEL-UUID>
 credentials-file: /Users/YOU/.cloudflared/<TUNNEL-UUID>.json

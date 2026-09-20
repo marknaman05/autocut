@@ -150,6 +150,7 @@
   .card .row .aside { display: flex; align-items: baseline; gap: 14px; }
   .card .delete { background: none; border: 0; color: var(--faint); font-size: 13px; padding: 0; }
   .card .delete:hover:not(:disabled) { color: var(--out); }
+  .card .delete.armed { color: var(--out); font-weight: 500; }
   .card.error .name { color: var(--muted); }
   .kept { font-size: 13px; color: var(--faint); }
   #toast {
@@ -236,8 +237,15 @@
   .finish .right { display: flex; align-items: center; gap: 20px; flex-wrap: wrap; margin-left: auto; }
   .totals { font-size: 14px; color: var(--muted); }
   .totals b { font-family: var(--mono); font-weight: 500; font-size: 18px; color: var(--ink); letter-spacing: 0; }
-  .styles-head { font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint); margin-right: 4px; flex-basis: 100%; }
-  .styles { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
+  .styles-head {
+    font-family: var(--mono); font-size: 12px; letter-spacing: .06em; text-transform: uppercase; color: var(--faint);
+    margin-right: 4px; display: flex; align-items: center; gap: 8px;
+    background: none; border: 0; padding: 0; cursor: default; text-align: left;
+  }
+  .styles-head .chosen { color: var(--ink-soft); }
+  .styles-head .chevron { display: none; transition: transform .15s; }
+  .styles { display: flex; flex-direction: column; gap: 10px; }
+  .strip { display: flex; gap: 18px; flex-wrap: wrap; align-items: center; }
   .style { position: relative; display: flex; flex-direction: column; align-items: center; gap: 8px; cursor: pointer; }
   .style input { position: absolute; opacity: 0; width: 0; height: 0; }
   .style img { display: block; width: 132px; border-radius: var(--r-md); background: #1c2129; border: 1px solid var(--border); outline: 2px solid transparent; outline-offset: 2px; transition: border-color .15s, outline-color .15s; }
@@ -260,7 +268,23 @@
   .stats b { font-family: var(--mono); font-weight: 500; font-size: 20px; color: var(--ink); letter-spacing: 0; }
   .stats span { font-family: var(--mono); font-size: 10px; letter-spacing: .04em; text-transform: uppercase; color: var(--faint); }
   .actions { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  /* The paywall: the page blurs behind a card that says what it costs. */
+  #paywall { position: fixed; inset: 0; z-index: 50; display: grid; place-items: center; padding: 20px;
+             background: rgba(250, 250, 250, .55); backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px); }
+  #paywall[hidden] { display: none; }
+  #paywall .sheet { background: var(--paper); border: 1px solid var(--border); border-radius: var(--r-lg); padding: 32px;
+                    max-width: 420px; width: 100%; box-shadow: var(--lift); display: flex; flex-direction: column; gap: 18px; }
+  #paywall .eyebrow { font-family: var(--mono); font-size: 11px; letter-spacing: .08em; text-transform: uppercase; color: var(--muted); }
+  #paywall h2 { font-family: var(--serif); font-weight: 400; font-size: 34px; line-height: 1.08; letter-spacing: -0.02em; }
+  #paywall p { color: var(--body); }
+  #paywall .actions { display: flex; gap: 12px; flex-wrap: wrap; }
+  #paywall .btn-primary { display: inline-flex; align-items: center; gap: 8px; text-decoration: none; }
   a.download { text-decoration: none; }
+  a.download.locked { display: inline-flex; align-items: center; gap: 8px; }
+  .plan-note { font-size: 13px; color: var(--muted); }
+  .plan-note a { color: var(--ink-soft); }
+  #whoami a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--border-subtle); margin-left: 8px; }
+  #whoami a:hover { border-color: var(--ink-soft); }
 
   /* ---- publish ---- */
   .publish { background: var(--paper); border: 1px solid var(--border-subtle); border-radius: var(--r-lg); padding: 20px 24px; display: flex; flex-direction: column; gap: 14px; }
@@ -281,13 +305,43 @@
 
   @media (max-width: 900px) {
     body { padding: 0 20px 48px; }
+    /* The header stacks: the wordmark on its own line, then who is here. */
+    header { flex-direction: column; align-items: flex-start; gap: 6px; padding-top: 20px; }
+    header .meta { font-size: 13px; }
     #home, body.working #home { grid-template-columns: 1fr; gap: 32px; margin-top: 40px; }
     #home h1 { font-size: 44px; }
-    .review { grid-template-columns: 1fr; }
+    body.working #home { margin-top: 28px; }
+    body.working #drop { height: 140px; }
+    /* Presets: the word on its own line, the three buttons sharing the next. */
+    .presets { gap: 8px; }
+    .presets > span { flex-basis: 100%; }
+    .presets label { flex: 1 1 0; justify-content: center; padding: 9px 8px; font-size: 13px; line-height: 1.25; text-align: center; white-space: normal; }
+    #jobs { margin-top: 32px; }
+    .card { padding: 20px 16px; }
+    .review { grid-template-columns: minmax(0, 1fr); }
+    .finish { min-width: 0; }
     .dock { position: static; order: -1; flex-direction: row; align-items: flex-end; gap: 16px; }
     .dock video { max-width: 200px; }
     .output { grid-template-columns: 1fr; }
     .output .frame { max-width: 300px; }
+    /* On a phone the six thumbnails would be most of the screen, so the
+       strip is folded behind its heading and opens on a tap. */
+    .finish { padding: 12px 16px; gap: 12px; }
+    .styles-head { cursor: pointer; padding: 4px 0; }
+    .styles-head .chevron { display: block; margin-left: auto; }
+    .finish.open .styles-head .chevron { transform: rotate(180deg); }
+    /* Open, the thumbnails are one row that scrolls sideways -- a strip to
+       flick through, not a grid that pushes Render off the screen.  It
+       bleeds to the card's edges so the last one peeks in from the right. */
+    .styles { width: 100%; min-width: 0; }
+    .strip { display: none; min-width: 0; gap: 12px; flex-wrap: nowrap; overflow-x: auto; overscroll-behavior-x: contain;
+             scroll-snap-type: x proximity; scrollbar-width: none; -webkit-overflow-scrolling: touch;
+             margin: 0 -16px; padding: 4px 16px; }
+    .strip::-webkit-scrollbar { display: none; }
+    .finish.open .strip { display: flex; }
+    .style { flex: none; scroll-snap-align: start; }
+    .style img { width: 112px; }
+    .finish .right { width: 100%; margin-left: 0; justify-content: space-between; }
   }
 </style>
 </head>
@@ -325,6 +379,20 @@
   </section>
 
   <div id="jobs"></div>
+<div id="paywall" hidden role="dialog" aria-modal="true" aria-labelledby="paywall-title">
+  <div class="sheet">
+    <div class="eyebrow">Trial complete</div>
+    <h2 id="paywall-title">Your free videos are used up.</h2>
+    <p>Everything you've already uploaded is still yours to edit, re-render and download. Uploading a new video is what Pro is for.</p>
+    <div class="actions">
+      <a class="btn-primary lg" href="/pricing">
+        <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+        Upgrade to Pro
+      </a>
+      <button class="btn-secondary lg" id="paywall-close">Not now</button>
+    </div>
+  </div>
+</div>
 </main>
 
 <script>
@@ -364,24 +432,166 @@ input.addEventListener("change", () => {
   input.value = "";
 });
 
-async function upload(file) {
-  const body = new FormData();
-  body.append("file", file);
-  body.append("preset", document.querySelector(".presets input:checked").value);
+// How a video gets here.  A small one in a single request; a large one in
+// parts, because the proxy in front of the app (Cloudflare) caps a request
+// at 100 MB.  /me says where the line is; see server/uploads.py.
+let partSize = Infinity;
+// "free" or "pro"; decides whether the finished card offers the download
+// or the pricing page.  Pro until /me says otherwise, so the local tool is
+// never gated by a page that has not heard back yet.
+let plan = "pro";
+// A trial's allowance from /me, or null.  Checked before an upload starts
+// so the paywall appears on the drop, not after a wait; the server checks
+// too, so a stale page just meets it one step later.
+let credits = null;
 
+function paywall(show) {
+  const el = document.getElementById("paywall");
+  el.hidden = !show;
+  document.body.style.overflow = show ? "hidden" : "";
+}
+document.getElementById("paywall-close").addEventListener("click", () => paywall(false));
+document.getElementById("paywall").addEventListener("click", e => { if (e.target.id === "paywall") paywall(false); });
+document.addEventListener("keydown", e => { if (e.key === "Escape") paywall(false); });
+
+async function upload(file) {
+  if (credits && credits.left === 0) { paywall(true); return; }
+  const preset = document.querySelector(".presets input:checked").value;
   const card = addCard(file.name);
   try {
-    const response = await fetch("/jobs", { method: "POST", body });
-    if (!response.ok) throw new Error(await response.text());
-    const job = await response.json();
+    const job = file.size > partSize
+      ? await uploadInParts(file, preset, card)
+      : await uploadDirect(file, preset, card);
     card.dataset.id = job.id;
     render(card, job);
     listen(card, job.id);
+    if (credits) credits = { ...credits, used: credits.used + 1, left: Math.max(0, credits.left - 1) };
   } catch (error) {
     card.remove();
     if (!jobsEl.children.length) document.body.classList.remove("working");
+    if (error.cancelled) return;
+    if (error.status === 402) { paywall(true); return; }
     toast(`Could not upload: ${String(error.message || error).replace(/^\{"detail":"|"\}$/g, "")}`);
   }
+}
+
+// An HTTP refusal, with the status kept so a 402 can be told apart.
+async function refused(response) {
+  const error = new Error(await response.text());
+  error.status = response.status;
+  return error;
+}
+
+// One request, but still with a progress bar: a 40 MB file on a home
+// uplink is long enough that a card sitting still looks broken.
+function uploadDirect(file, preset, card) {
+  const body = new FormData();
+  body.append("file", file);
+  body.append("preset", preset);
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", "/jobs");
+    xhr.upload.onprogress = e => {
+      const pct = e.lengthComputable ? Math.floor(100 * e.loaded / e.total) : 0;
+      card.querySelector(".pct").textContent = pct < 100 ? `uploading · ${pct}%` : "uploading · checking";
+      card.querySelector(".bar > i").style.width = `${pct}%`;
+    };
+    xhr.onload = () => {
+      if (xhr.status >= 200 && xhr.status < 300) resolve(JSON.parse(xhr.responseText));
+      else { const error = new Error(xhr.responseText); error.status = xhr.status; reject(error); }
+    };
+    xhr.onerror = () => reject(new Error("the connection dropped"));
+    xhr.onabort = () => reject(cancelled());
+    card.cancel = () => xhr.abort();
+    card.querySelector(".pct").textContent = "uploading · 0%";
+    xhr.send(body);
+  });
+}
+
+function cancelled() {
+  const error = new Error("cancelled");
+  error.cancelled = true;
+  return error;
+}
+
+async function uploadInParts(file, preset, card) {
+  const started = await fetch("/uploads", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ filename: file.name, size: file.size, preset }),
+  });
+  if (!started.ok) throw await refused(started);
+  const { id, part_size, parts } = await started.json();
+
+  const sent = new Array(parts).fill(0);
+  const progress = (state) => {
+    const done = sent.reduce((a, b) => a + b, 0);
+    const pct = Math.floor(100 * done / file.size);
+    const note = state && state.retrying ? ` · retrying (${state.retrying}/${PART_ATTEMPTS - 1})` : "";
+    card.querySelector(".pct").textContent = `uploading · ${pct}%${note}`;
+    card.querySelector(".bar > i").style.width = `${pct}%`;
+  };
+  progress();
+
+  const inflight = { xhr: null, cancelled: false };
+  card.cancel = () => { inflight.cancelled = true; if (inflight.xhr) inflight.xhr.abort(); };
+  try {
+    for (let n = 0; n < parts; n++) {
+      if (inflight.cancelled) throw cancelled();
+      const part = file.slice(n * part_size, (n + 1) * part_size);
+      await putPart(`/uploads/${id}/${n + 1}`, part, (loaded, state) => { sent[n] = loaded; progress(state); }, inflight);
+    }
+  } catch (error) {
+    fetch(`/uploads/${id}`, { method: "DELETE" }).catch(() => {});
+    throw error;
+  }
+
+  card.querySelector(".pct").textContent = "uploading · checking";
+  const finished = await fetch(`/uploads/${id}/finish`, { method: "POST" });
+  if (!finished.ok) throw new Error(await finished.text());
+  return finished.json();
+}
+
+// One part, PUT raw.  XMLHttpRequest rather than fetch for the upload
+// progress events.  A part that fails is tried again, waiting a little
+// longer each time, before the whole upload is given up on; the server
+// writes it at its offset, so a retry that half-landed does no harm.  A
+// part that stops moving is given up on too: when the tunnel behind the
+// site drops for a minute, the edge holds the request open rather than
+// refusing it, and without this the bar would just sit there.
+const PART_ATTEMPTS = 6;
+const PART_STALL_MS = 60 * 1000;
+
+function putPart(url, blob, onProgress, inflight, attempt = 1) {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    inflight.xhr = xhr;
+    let stall = null;
+    const watch = () => { clearTimeout(stall); stall = setTimeout(() => xhr.abort(), PART_STALL_MS); };
+    xhr.open("PUT", url);
+    xhr.upload.onprogress = e => { onProgress(e.loaded); watch(); };
+    xhr.onload = () => {
+      clearTimeout(stall);
+      if (xhr.status >= 200 && xhr.status < 300) resolve();
+      // 4xx is a verdict, not a hiccup: our part is wrong, or the upload is gone.
+      else if (xhr.status >= 400 && xhr.status < 500) reject(new Error(xhr.responseText));
+      else retry(new Error(`part refused (${xhr.status})`));
+    };
+    xhr.onerror = () => { clearTimeout(stall); retry(new Error("the connection dropped")); };
+    xhr.onabort = () => {
+      clearTimeout(stall);
+      if (inflight.cancelled) reject(cancelled()); else retry(new Error("the upload stalled"));
+    };
+    const retry = error => {
+      if (inflight.cancelled) { reject(cancelled()); return; }
+      if (attempt >= PART_ATTEMPTS) { reject(error); return; }
+      onProgress(0, { retrying: attempt });
+      const wait = Math.min(30, 2 ** attempt) * 1000;
+      setTimeout(() => putPart(url, blob, onProgress, inflight, attempt + 1).then(resolve, reject), wait);
+    };
+    watch();
+    xhr.send(blob);
+  });
 }
 
 // One line at the bottom of the page for things that are not about one
@@ -396,14 +606,50 @@ function toast(text) {
   toastTimer = setTimeout(() => { el.hidden = true; }, 8000);
 }
 
-async function removeJob(card) {
+// Two clicks, not a confirm(): browsers suppress native dialogs after a
+// few of them (and some mobile ones never show them), and then the button
+// silently does nothing.  The first click arms the button for a few
+// seconds; the second one deletes.
+async function removeJob(card, button) {
   const id = card.dataset.id;
-  if (!id) { card.remove(); return; }
-  if (!confirm("Delete this video and everything kept for it? This cannot be undone.")) return;
-  const response = await fetch(`/jobs/${id}`, { method: "DELETE" });
-  if (!response.ok) { toast(`Could not delete: ${await response.text()}`); return; }
+  if (!id) {
+    // Still uploading: stop the bytes, not just the card.  The upload's
+    // own catch tells the server and removes the card.
+    if (card.cancel) card.cancel(); else card.remove();
+    return;
+  }
+  if (!button.dataset.armed) {
+    button.dataset.armed = "1";
+    button.textContent = "Really delete?";
+    button.classList.add("armed");
+    button.timer = setTimeout(() => disarm(button), 5000);
+    return;
+  }
+  disarm(button);
+  button.disabled = true;
+  button.textContent = "Deleting…";
+  let response;
+  try {
+    response = await fetch(`/jobs/${id}`, { method: "DELETE" });
+  } catch (e) {
+    toast(`Could not delete: ${e.message}`);
+    button.disabled = false; button.textContent = "Delete";
+    return;
+  }
+  if (!response.ok) {
+    toast(`Could not delete: ${await response.text()}`);
+    button.disabled = false; button.textContent = "Delete";
+    return;
+  }
   card.remove();
   if (!jobsEl.children.length) document.body.classList.remove("working");
+}
+
+function disarm(button) {
+  clearTimeout(button.timer);
+  delete button.dataset.armed;
+  button.classList.remove("armed");
+  button.textContent = "Delete";
 }
 
 function addCard(filename) {
@@ -417,7 +663,7 @@ function addCard(filename) {
     <div class="review" hidden></div>
     <div class="output"></div>`;
   card.querySelector(".name").textContent = filename;
-  card.querySelector(".delete").addEventListener("click", () => removeJob(card));
+  card.querySelector(".delete").addEventListener("click", (e) => removeJob(card, e.currentTarget));
   jobsEl.prepend(card);
   document.body.classList.add("working");
   return card;
@@ -483,9 +729,17 @@ function render(card, job) {
     const stem = escape(job.filename.replace(/\.[^.]+$/, ""));
     // The render's own filename goes in the URL: a re-render is a different
     // file, and this is what stops the browser replaying the previous one.
-    const result = `/jobs/${card.dataset.id}/result?v=${encodeURIComponent(s.output || "")}`;
+    const stamp = `?v=${encodeURIComponent(s.output || "")}`;
+    const watch = `/jobs/${card.dataset.id}/watch${stamp}`;
+    const result = `/jobs/${card.dataset.id}/result${stamp}`;
+    // Free plan: the video plays here, and the download is what Pro buys.
+    const download = plan === "pro"
+      ? `<a class="btn-primary lg download" href="${result}" download>Download MP4</a>`
+      : `<a class="btn-primary lg download locked" href="/pricing" title="Downloading is on the Pro plan">
+           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>
+           Upgrade to download</a>`;
     card.querySelector(".output").innerHTML = `
-      <div class="frame"><video controls preload="metadata" src="${result}"></video></div>
+      <div class="frame"><video controls controlsList="nodownload" preload="metadata" src="${watch}"></video></div>
       <div class="result">
         <div>
           <div class="state">&#9679; Finished</div>
@@ -502,9 +756,10 @@ function render(card, job) {
           <div><b>${escape(job.caption_style || "classic")}</b><span>captions</span></div>
         </div>
         <div class="actions">
-          <a class="btn-primary lg download" href="${result}" download>Download MP4</a>
+          ${download}
           <button class="btn-secondary lg back">Back to the edit</button>
         </div>
+        ${plan === "pro" ? "" : `<div class="plan-note">You're on the free plan: watch it here, <a href="/pricing">upgrade</a> to keep it.</div>`}
         <div class="publish"></div>
       </div>`;
     showPublish(card);
@@ -643,7 +898,7 @@ function styles() {
 }
 
 async function showStyles(card, panel) {
-  const strip = panel.querySelector(".styles");
+  const strip = panel.querySelector(".strip");
   const id = card.dataset.id;
   const list = await styles();
   const chosen = panel.dataset.style || "classic";
@@ -653,9 +908,24 @@ async function showStyles(card, panel) {
       <img src="/caption-styles/${escape(s.name)}.png" alt="">
       <span>${escape(s.label)}</span>
     </label>`).join(""));
+  const finish = panel.querySelector(".finish");
+  const head = panel.querySelector(".styles-head");
+  const label = () => {
+    const current = list.find(s => s.name === (panel.dataset.style || "classic"));
+    head.querySelector(".chosen").textContent = current ? `· ${current.label}` : "";
+  };
+  label();
+  // Only does anything where the strip is folded (see the narrow-screen
+  // CSS); on a wide screen the thumbnails are always shown and this is inert.
+  head.addEventListener("click", () => {
+    const open = finish.classList.toggle("open");
+    head.setAttribute("aria-expanded", String(open));
+    if (open) strip.querySelector(".style.selected")?.scrollIntoView({ inline: "center", block: "nearest" });
+  });
   strip.addEventListener("change", event => {
     panel.dataset.style = event.target.value;
     strip.querySelectorAll(".style").forEach(l => l.classList.toggle("selected", l.contains(event.target)));
+    label();
   });
 }
 
@@ -694,7 +964,12 @@ async function showReview(card, job) {
       <div class="now"><span>Preview</span><span class="where"></span></div>
     </div>
     <div class="finish">
-      <div class="styles" role="radiogroup" aria-label="caption style"><span class="styles-head">Captions</span></div>
+      <div class="styles">
+        <button type="button" class="styles-head" aria-expanded="false">Captions <span class="chosen"></span>
+          <svg class="chevron" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="m6 15 6-6 6 6"/></svg>
+        </button>
+        <div class="strip" role="radiogroup" aria-label="caption style"></div>
+      </div>
       <div class="right">
         <div class="totals"></div>
         <button class="btn-primary lg primary">Render video</button>
@@ -968,20 +1243,28 @@ function listen(card, id) {
   source.onerror = close;
 }
 
+// Who is here comes first: the plan decides how a finished card is drawn.
 fetch("/me").then(r => r.ok ? r.json() : null).then(me => {
-  if (me && !me.local) document.getElementById("whoami").textContent = me.email;
-}).catch(() => {});
-
-// Pick up anything already running, so a reload does not lose a job.
-fetch("/jobs").then(r => r.json()).then(jobs => {
-  if (jobs.length) document.body.classList.add("working");
-  for (const job of jobs.reverse()) {
-    const card = addCard(job.filename);
-    card.dataset.id = job.id;
-    render(card, job);
-    if (job.status !== "done" && job.status !== "error") listen(card, job.id);
+  if (me && me.part_size) partSize = me.part_size;
+  if (me && me.plan) plan = me.plan;
+  if (me) credits = me.credits || null;
+  if (me && !me.local) {
+    const who = document.getElementById("whoami");
+    who.textContent = me.email;
+    if (me.plan === "free") who.insertAdjacentHTML("beforeend", `<a href="/pricing">free plan &middot; upgrade</a>`);
   }
-});
+}).catch(() => {}).then(() =>
+  // Pick up anything already running, so a reload does not lose a job.
+  fetch("/jobs").then(r => r.json()).then(jobs => {
+    if (jobs.length) document.body.classList.add("working");
+    for (const job of jobs.reverse()) {
+      const card = addCard(job.filename);
+      card.dataset.id = job.id;
+      render(card, job);
+      if (job.status !== "done" && job.status !== "error") listen(card, job.id);
+    }
+  })
+);
 </script>
 </body>
 </html>
