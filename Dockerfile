@@ -5,10 +5,12 @@
 FROM python:3.12-slim-trixie
 
 ENV PYTHONUNBUFFERED=1 UV_COMPILE_BYTECODE=1 UV_LINK_MODE=copy
+# TARGETARCH is amd64 or arm64 (Oracle's free Ampere VMs are arm64).
+ARG TARGETARCH
 RUN apt-get update && apt-get install -y --no-install-recommends \
         ffmpeg libgl1 libglib2.0-0 curl ca-certificates \
     && curl -fsSL -o /usr/local/bin/cloudflared \
-        https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-amd64 \
+        "https://github.com/cloudflare/cloudflared/releases/latest/download/cloudflared-linux-${TARGETARCH}" \
     && chmod +x /usr/local/bin/cloudflared \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
