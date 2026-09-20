@@ -1,0 +1,30 @@
+# Fly.io: one small machine in Mumbai with a persistent disk.  No public
+# service is declared on purpose: traffic arrives through the Cloudflare
+# Tunnel running inside the container.
+app = "autocut-server"
+primary_region = "bom"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  AUTOCUT_RETENTION_DAYS = "7"
+  AUTOCUT_MAX_UPLOAD_BYTES = "2147483648"
+  AUTOCUT_MAX_JOBS_PER_USER = "5"
+  AUTOCUT_MAX_BYTES_PER_USER = "3221225472"
+  AUTOCUT_PRO = "marknaman05@gmail.com"
+  AUTOCUT_PUBLIC_URL = "https://autocut.mynameisnaman.in"
+
+[mounts]
+  source = "autocut_data"
+  destination = "/data"
+  initial_size = "20gb"
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+# Keep exactly one machine: the SQLite database and the render queue are
+# per-instance.
+[deploy]
+  strategy = "immediate"

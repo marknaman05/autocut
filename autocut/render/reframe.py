@@ -22,7 +22,6 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..config import ReframeConfig
-from ..ffmpeg import version as ffmpeg_version
 from ..models import ZoomSpan
 
 log = logging.getLogger(__name__)
@@ -248,13 +247,12 @@ class ReframePlan:
     static_zoom: bool = False
 
     def filter_string(self, out_width: int, out_height: int, fps: float) -> str:
-        # ffmpeg 9 dropped crop's `eval` option and evaluates x/y per frame
-        # always; older builds default to evaluating them once, which would
-        # freeze the framing on the first frame.
-        per_frame = "" if ffmpeg_version() >= (9, 0) else ":eval=frame"
+        # crop evaluates x/y per frame on every ffmpeg release (verified on
+        # 7.1 and 9.0); it has never had an `eval` option, and passing one
+        # is a hard error on builds before 9.
         chain = [
             f"scale={self.prescale_width}:{self.prescale_height}:flags=bicubic",
-            f"crop=w={out_width}:h={out_height}:x='{self.x}':y='{self.y}'{per_frame}",
+            f"crop=w={out_width}:h={out_height}:x='{self.x}':y='{self.y}'",
         ]
         if not self.static_zoom:
             # Zoom about the centre of the already-framed picture.

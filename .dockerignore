@@ -1,0 +1,9 @@
+.venv
+work
+tests
+.git
+.env
+*.mov
+*.mp4
+samples/build
+__pycache__
