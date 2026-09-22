@@ -284,6 +284,8 @@
   .plan-note { font-size: 13px; color: var(--muted); }
   .plan-note a { color: var(--ink-soft); }
   #whoami a { color: inherit; text-decoration: none; border-bottom: 1px solid var(--border-subtle); margin-left: 8px; }
+  #whoami .signout{background:none;border:0;padding:0;margin-left:12px;font:inherit;color:var(--faint);cursor:pointer}
+  #whoami .signout:hover{color:var(--ink)}
   #whoami a:hover { border-color: var(--ink-soft); }
 
   /* ---- publish ---- */
@@ -1244,7 +1246,11 @@ function listen(card, id) {
 }
 
 // Who is here comes first: the plan decides how a finished card is drawn.
-fetch("/me").then(r => r.ok ? r.json() : null).then(me => {
+fetch("/me").then(r => {
+  // Our own sign-in: a session that expired mid-visit goes back to the login page.
+  if (r.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname); return null; }
+  return r.ok ? r.json() : null;
+}).then(me => {
   if (me && me.part_size) partSize = me.part_size;
   if (me && me.plan) plan = me.plan;
   if (me) credits = me.credits || null;
@@ -1252,6 +1258,7 @@ fetch("/me").then(r => r.ok ? r.json() : null).then(me => {
     const who = document.getElementById("whoami");
     who.textContent = me.email;
     if (me.plan === "free") who.insertAdjacentHTML("beforeend", `<a href="/pricing">free plan &middot; upgrade</a>`);
+    if (me.can_sign_out) who.insertAdjacentHTML("beforeend", `<form method="post" action="/logout" style="display:inline"><button type="submit" class="signout">sign out</button></form>`);
   }
 }).catch(() => {}).then(() =>
   // Pick up anything already running, so a reload does not lose a job.

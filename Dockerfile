@@ -27,9 +27,11 @@ COPY README.md ./
 RUN uv sync --frozen --no-dev --extra server --extra vision
 
 # Data lives on the mounted volume; the paths are absolute on purpose.
+# Identity is decided by the environment file: AUTOCUT_GOOGLE_CLIENT_ID/_SECRET
+# + AUTOCUT_SESSION_SECRET for the app's own Google sign-in, or
+# AUTOCUT_USER_HEADER when a proxy (Cloudflare Access) does the login.
 ENV AUTOCUT_WORK_ROOT=/data/work AUTOCUT_DB=/data/autocut.db \
-    AUTOCUT_ASR_BACKEND=openrouter AUTOCUT_RETAKE_BACKEND=openrouter \
-    AUTOCUT_USER_HEADER=Cf-Access-Authenticated-User-Email
+    AUTOCUT_ASR_BACKEND=openrouter AUTOCUT_RETAKE_BACKEND=openrouter
 COPY deploy/start.sh /start.sh
 RUN chmod +x /start.sh
 CMD ["/start.sh"]

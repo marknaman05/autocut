@@ -1,6 +1,8 @@
 """Who is asking.
 
-There is no login here.  Identity arrives as a request header set by a proxy
+Three ways to know.  With ``AUTOCUT_GOOGLE_CLIENT_ID``/``_SECRET`` set the app
+signs people in itself with Google (see ``login``) and keeps the address in a
+signed cookie.  Otherwise identity arrives as a request header set by a proxy
 that has already done the login -- Cloudflare Access puts the signed-in
 address in ``Cf-Access-Authenticated-User-Email``, Tailscale's ``serve`` in
 ``Tailscale-User-Login`` -- and the app trusts that header for one reason
@@ -29,13 +31,24 @@ the result in the page, but the download is behind the pricing page.
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import os
+import time
 from dataclasses import dataclass
 from typing import Callable
 
 from fastapi import HTTPException, Request
 
 HEADER_ENV = "AUTOCUT_USER_HEADER"
+#: Google sign-in, handled by the app itself (see ``login``).  With these set
+#: and no trusted header, identity comes from a signed session cookie.
+GOOGLE_CLIENT_ID_ENV = "AUTOCUT_GOOGLE_CLIENT_ID"
+GOOGLE_CLIENT_SECRET_ENV = "AUTOCUT_GOOGLE_CLIENT_SECRET"
+SESSION_SECRET_ENV = "AUTOCUT_SESSION_SECRET"
+SESSION_COOKIE = "autocut_session"
+SESSION_DAYS = 30
 OWNERS_ENV = "AUTOCUT_OWNERS"
 PRO_ENV = "AUTOCUT_PRO"
 TRIAL_ENV = "AUTOCUT_TRIAL"
@@ -65,8 +78,58 @@ class User:
 
 
 def header_name() -> str | None:
-    """The trusted header, or ``None`` in single-user mode."""
+    """The trusted header, or ``None`` when the proxy is not the login."""
     return os.environ.get(HEADER_ENV) or None
+
+
+def google_enabled() -> bool:
+    return bool(os.environ.get(GOOGLE_CLIENT_ID_ENV) and os.environ.get(GOOGLE_CLIENT_SECRET_ENV))
+
+
+def mode() -> str:
+    """``"header"`` (proxy did the login), ``"google"`` (we do it) or ``"local"``."""
+    if header_name():
+        return "header"
+    if google_enabled():
+        return "google"
+    return "local"
+
+
+# -- session cookie -----------------------------------------------------------
+# ``<email>|<expiry>|<hmac>``, base64.  HMAC-SHA256 over email and expiry with
+# the server secret, so a cookie cannot be minted or altered without it.
+
+def _secret() -> bytes:
+    secret = os.environ.get(SESSION_SECRET_ENV, "")
+    if len(secret) < 32:
+        raise RuntimeError(f"{SESSION_SECRET_ENV} must be set to a random string of 32+ characters")
+    return secret.encode()
+
+
+def _sign(email: str, expires: int) -> str:
+    return hmac.new(_secret(), f"{email}|{expires}".encode(), hashlib.sha256).hexdigest()
+
+
+def make_session(email: str, *, days: int = SESSION_DAYS, now: float | None = None) -> str:
+    expires = int((now or time.time()) + days * 86400)
+    raw = f"{email}|{expires}|{_sign(email, expires)}"
+    return base64.urlsafe_b64encode(raw.encode()).decode()
+
+
+def read_session(token: str | None, *, now: float | None = None) -> str | None:
+    """The email in a valid, unexpired session cookie, else ``None``."""
+    if not token:
+        return None
+    try:
+        email, expires_s, sig = base64.urlsafe_b64decode(token.encode()).decode().split("|")
+        expires = int(expires_s)
+    except (ValueError, UnicodeDecodeError):
+        return None
+    if expires < (now or time.time()):
+        return None
+    if not hmac.compare_digest(sig, _sign(email, expires)):
+        return None
+    return email
 
 
 def _addresses(env: str) -> set[str]:
@@ -111,10 +174,13 @@ def current_user(request: Request) -> User:
     request did not come through the proxy, and there is no safe answer to
     "who is this".
     """
-    header = header_name()
-    if header is None:
+    current = mode()
+    if current == "local":
         return User(email=LOCAL, can_publish=True)
-    value = request.headers.get(header, "").strip().lower()
+    if current == "header":
+        value = request.headers.get(header_name(), "").strip().lower()
+    else:
+        value = (read_session(request.cookies.get(SESSION_COOKIE)) or "").strip().lower()
     if not value:
         raise HTTPException(401, "not signed in")
     return User(

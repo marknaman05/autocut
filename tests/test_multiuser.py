@@ -73,6 +73,7 @@ class TestIdentity:
             "email": "local", "can_publish": True, "plan": "pro", "credits": None, "local": True,
             "part_size": uploads.PART_SIZE,
             "billing": {"enabled": False, "environment": None, "subscription": None},
+            "can_sign_out": False,
         }
 
     def test_with_a_header_configured_it_is_required(self, client, manager, multiuser) -> None:
@@ -84,6 +85,7 @@ class TestIdentity:
             "email": "ann@example.com", "can_publish": False, "plan": "free", "credits": None, "local": False,
             "part_size": uploads.PART_SIZE,
             "billing": {"enabled": False, "environment": None, "subscription": None},
+            "can_sign_out": False,
         }
 
     def test_owners_may_publish(self, client, manager, multiuser) -> None:

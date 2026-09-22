@@ -181,6 +181,16 @@ service's own reason.
 
 ## Serving it to other people
 
+Two ways to know who is uploading. The simplest is to let the app sign
+people in with Google: create a *Web application* OAuth client in Google
+Cloud whose redirect URI is `<your public URL>/auth/callback`, and set
+`AUTOCUT_GOOGLE_CLIENT_ID`, `AUTOCUT_GOOGLE_CLIENT_SECRET`, a random
+`AUTOCUT_SESSION_SECRET` and `AUTOCUT_PUBLIC_URL`. Visitors get a "Continue
+with Google" page; the address comes back in a signed 30-day cookie; no
+user cap, no dependency on anyone else's login. The alternative, described
+below, is to put a proxy that does the login in front and trust its header.
+
+
 Several people can use one instance, each seeing only their own videos. The
 app does no login of its own; it trusts a request header set by a proxy that
 already did, and it is only safe because that proxy is the only way in.

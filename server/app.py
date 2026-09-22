@@ -24,14 +24,16 @@ from pathlib import Path
 from typing import Annotated
 
 from fastapi import Body, Depends, FastAPI, Form, HTTPException, Request, UploadFile
-from fastapi.responses import FileResponse, HTMLResponse, Response, StreamingResponse
+from fastapi.responses import FileResponse, HTMLResponse, RedirectResponse, Response, StreamingResponse
 
 from autocut import publish
 from autocut.config import CAPTION_STYLE_LABELS, CAPTION_STYLES
 from autocut.publish.instagram import InstagramError
 
-from . import billing, retention, uploads, watermark
-from .auth import User, current_user, header_name, plan_source
+from . import billing, login, retention, uploads, watermark
+from .auth import SESSION_COOKIE, User, current_user, header_name, plan_source, read_session
+from .auth import mode as auth_mode
+from . import auth
 from .jobs import PRESETS, BadUpload, Job, JobManager, QuotaExceeded
 from .samples import caption_sample
 
@@ -59,10 +61,12 @@ Viewer = Annotated[User, Depends(current_user)]
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
-    if header_name():
+    if auth_mode() == "header":
         log.info("multi-user: trusting %s for identity", header_name())
+    elif auth_mode() == "google":
+        log.info("multi-user: Google sign-in, %d-day sessions", auth.SESSION_DAYS)
     else:
-        log.info("single-user: no AUTOCUT_USER_HEADER set")
+        log.info("single-user: no AUTOCUT_USER_HEADER or Google client set")
     if billing.enabled():
         log.info("billing: Dodo Payments (%s)", billing.environment())
     else:
@@ -75,6 +79,7 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="autocut", lifespan=lifespan)
+app.include_router(login.router)
 
 
 def require_job(job_id: str, user: User) -> Job:
@@ -86,7 +91,11 @@ def require_job(job_id: str, user: User) -> Job:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index() -> str:
+async def index(request: Request):
+    # With our own sign-in, an anonymous visitor lands on the login page
+    # rather than an app whose every call would 401.
+    if auth_mode() == "google" and not read_session(request.cookies.get(SESSION_COOKIE)):
+        return RedirectResponse("/login", status_code=302)
     return (STATIC / "index.html").read_text()
 
 
@@ -109,6 +118,8 @@ async def me(user: Viewer) -> dict:
         # Anything larger goes up in parts of this size (see ``uploads``).
         "part_size": uploads.PART_SIZE,
         "billing": billing_status(user),
+        # So the page can offer "sign out" only when there is a session to end.
+        "can_sign_out": auth_mode() == "google",
     }
 
 

@@ -28,6 +28,11 @@ DODO_PAYMENTS_WEBHOOK_KEY=
 DODO_PAYMENTS_ENVIRONMENT=test_mode
 # `cloudflared tunnel token autocut` on the laptop prints this.
 CLOUDFLARE_TUNNEL_TOKEN=
+# Sign in with Google (a *Web application* OAuth client whose redirect URI is
+# <AUTOCUT_PUBLIC_URL>/auth/callback).  Session secret: any 32+ random chars.
+AUTOCUT_GOOGLE_CLIENT_ID=
+AUTOCUT_GOOGLE_CLIENT_SECRET=
+AUTOCUT_SESSION_SECRET=
 AUTOCUT_PRO=marknaman05@gmail.com
 AUTOCUT_PUBLIC_URL=https://autocut.mynameisnaman.in
 AUTOCUT_RETENTION_DAYS=7
