@@ -97,6 +97,22 @@ async def index() -> str:
     return (STATIC / "index.html").read_text()
 
 
+@app.get("/robots.txt", response_class=Response)
+async def robots() -> Response:
+    """Only the two public pages are worth a crawler's time."""
+    site = (os.environ.get("AUTOCUT_PUBLIC_URL") or "").rstrip("/")
+    body = "User-agent: *\nAllow: /$\nAllow: /pricing\nDisallow: /\n" + (f"Sitemap: {site}/sitemap.xml\n" if site else "")
+    return Response(body, media_type="text/plain")
+
+
+@app.get("/sitemap.xml", response_class=Response)
+async def sitemap() -> Response:
+    site = (os.environ.get("AUTOCUT_PUBLIC_URL") or "").rstrip("/")
+    urls = "".join(f"<url><loc>{site}{path}</loc></url>" for path in ("/", "/pricing"))
+    body = f'<?xml version="1.0" encoding="UTF-8"?><urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">{urls}</urlset>'
+    return Response(body, media_type="application/xml")
+
+
 @app.get("/pricing", response_class=HTMLResponse)
 async def pricing() -> str:
     """The plans, and where the download button sends a free user."""
