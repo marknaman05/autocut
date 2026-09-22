@@ -90,9 +90,9 @@ class TestSessions:
 
 
 class TestFlow:
-    def test_anonymous_visitor_is_sent_to_login(self, google, client):
+    def test_anonymous_visitor_sees_the_page_but_no_identity(self, google, client):
         r = client.get("/")
-        assert r.status_code == 302 and r.headers["location"] == "/login"
+        assert r.status_code == 200 and 'id="signin"' in r.text
         assert client.get("/me").status_code == 401
         page = client.get("/login")
         assert page.status_code == 200 and "Continue with Google" in page.text

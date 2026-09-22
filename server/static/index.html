@@ -102,6 +102,13 @@
     cursor: pointer; transition: border-color .15s, background-color .15s; text-align: center;
   }
   #drop:hover, #drop.over { border-color: var(--ink); border-style: solid; }
+  #signin { border: 1px solid var(--border); border-radius: var(--r-lg); padding: 40px 24px; text-align: center; display: flex; flex-direction: column; align-items: center; gap: 8px; background: var(--paper); }
+  #signin .glyph { width: 48px; height: 48px; border-radius: 12px; display: grid; place-items: center; background: var(--paper-tint); color: var(--ink); margin-bottom: 8px; }
+  #signin strong { font-size: 18px; font-weight: 600; }
+  #signin span { font-size: 14px; color: var(--muted); }
+  .btn-google { display: inline-flex; align-items: center; gap: 10px; margin-top: 16px; height: 44px; padding: 0 22px; border-radius: var(--r-md); background: var(--ink-soft); color: var(--paper); font: 500 15px var(--sans); text-decoration: none; }
+  .btn-google:hover { background: var(--ink); }
+  body.locked #drop, body.locked .presets { display: none; }
   #drop .glyph {
     width: 56px; height: 56px; border-radius: var(--r-md); background: var(--paper-tint);
     border: 1px solid var(--border-subtle); display: flex; align-items: center; justify-content: center;
@@ -365,6 +372,15 @@
       </ol>
     </div>
     <div class="intake">
+      <div id="signin" hidden>
+        <div class="glyph"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="10" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg></div>
+        <strong>Sign in to upload</strong>
+        <span>Your videos and edits stay yours. Free to try.</span>
+        <a class="btn-google" href="/auth/google">
+          <svg width="18" height="18" viewBox="0 0 48 48"><path fill="#EA4335" d="M24 9.5c3.5 0 6.6 1.2 9.1 3.6l6.8-6.8C35.8 2.4 30.3 0 24 0 14.6 0 6.5 5.4 2.6 13.2l7.9 6.1C12.4 13.5 17.7 9.5 24 9.5z"/><path fill="#4285F4" d="M46.5 24.5c0-1.6-.1-3.1-.4-4.5H24v9h12.7c-.6 3-2.3 5.5-4.8 7.2l7.5 5.8c4.4-4.1 7.1-10.1 7.1-17.5z"/><path fill="#FBBC05" d="M10.5 28.7A14.5 14.5 0 0 1 9.5 24c0-1.6.3-3.2.8-4.7l-7.9-6.1A24 24 0 0 0 0 24c0 3.9.9 7.5 2.6 10.8l7.9-6.1z"/><path fill="#34A853" d="M24 48c6.5 0 11.9-2.1 15.9-5.8l-7.5-5.8c-2.1 1.4-4.9 2.3-8.4 2.3-6.3 0-11.6-4-13.5-9.7l-7.9 6.1C6.5 42.6 14.6 48 24 48z"/></svg>
+          Continue with Google
+        </a>
+      </div>
       <div id="drop">
         <div class="glyph"><svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 16V4"></path><path d="M6 10l6-6 6 6"></path><path d="M4 20h16"></path></svg></div>
         <strong>Drop a video here</strong>
@@ -1247,8 +1263,13 @@ function listen(card, id) {
 
 // Who is here comes first: the plan decides how a finished card is drawn.
 fetch("/me").then(r => {
-  // Our own sign-in: a session that expired mid-visit goes back to the login page.
-  if (r.status === 401) { location.href = "/login?next=" + encodeURIComponent(location.pathname); return null; }
+  // Not signed in: the page stays, the intake becomes a sign-in card.
+  if (r.status === 401) {
+    document.body.classList.add("locked");
+    document.getElementById("signin").hidden = false;
+    document.getElementById("whoami").innerHTML = `<a href="/auth/google">Sign in</a>`;
+    return null;
+  }
   return r.ok ? r.json() : null;
 }).then(me => {
   if (me && me.part_size) partSize = me.part_size;
@@ -1262,7 +1283,7 @@ fetch("/me").then(r => {
   }
 }).catch(() => {}).then(() =>
   // Pick up anything already running, so a reload does not lose a job.
-  fetch("/jobs").then(r => r.json()).then(jobs => {
+  document.body.classList.contains("locked") ? null : fetch("/jobs").then(r => r.json()).then(jobs => {
     if (jobs.length) document.body.classList.add("working");
     for (const job of jobs.reverse()) {
       const card = addCard(job.filename);

@@ -91,11 +91,9 @@ def require_job(job_id: str, user: User) -> Job:
 
 
 @app.get("/", response_class=HTMLResponse)
-async def index(request: Request):
-    # With our own sign-in, an anonymous visitor lands on the login page
-    # rather than an app whose every call would 401.
-    if auth_mode() == "google" and not read_session(request.cookies.get(SESSION_COOKIE)):
-        return RedirectResponse("/login", status_code=302)
+async def index() -> str:
+    # The same page for everyone; signed out, the upload box is a sign-in
+    # card (the page learns which from /me).
     return (STATIC / "index.html").read_text()
 
 
